@@ -211,6 +211,27 @@ static void AVSC_CC comp_avs_dec_free(AVS_FilterInfo *fi)
     free(f);
 }
 
+/* avsresize reads _FieldBased per frame, but src_height is fixed at
+ * construction, so a clip whose field-ness changes mid-stream follows
+ * whatever frame 0 said. Does not consume `clip`. */
+static int comp_avs_clip_interlaced(AVS_ScriptEnvironment *env, AVS_Value clip)
+{
+    AVS_Clip *c = avs_take_clip(clip, env);
+    if (!c)
+        return 0;
+    AVS_VideoFrame *f = avs_get_frame(c, 0);
+    int interlaced = 0;
+    if (f) {
+        int err = 0;
+        const int64_t fb = avs_prop_get_int(env, avs_get_frame_props_ro(env, f),
+                                            "_FieldBased", 0, &err);
+        interlaced = !err && (fb == 1 || fb == 2);
+        avs_release_video_frame(f);
+    }
+    avs_release_clip(c);
+    return interlaced;
+}
+
 /* z_ConvertFormat(clip, width=, height=, pixel_type=, src_left=,
  * src_width=): one zimg graph does the format conversion and the subpixel
  * crop-resize, the same fused operation the VS plugin gets from
@@ -218,7 +239,15 @@ static void AVSC_CC comp_avs_dec_free(AVS_FilterInfo *fi)
  * A NaN src_left/src_width omits the subpixel crop (a plain resize, as
  * the Restore edge-splice needs for the source). `clip` is a non-owning
  * element copy; avs_invoke does not consume it. Returns an error
- * AVS_Value if avsresize is not installed. */
+ * AVS_Value if avsresize is not installed.
+ *
+ * Interlaced sources resample field-wise, which keeps 4:2:0 chroma
+ * upsampling from crossing field lines. avsresize halves the format height
+ * for that but then lets src_left/src_width overwrite the active height back
+ * to the full frame, so zimg reads a 480-row window out of a 240-row field
+ * and mirror-extends the edge, folding the picture about its midline.
+ * src_height is assigned from the same statement, so setting it pins the
+ * active height to the field. */
 static AVS_Value comp_avs_zresize_f(AVS_ScriptEnvironment *env, AVS_Value clip,
                                     const char *who, int width, int height,
                                     const char *pixel_type,
@@ -235,8 +264,8 @@ static AVS_Value comp_avs_zresize_f(AVS_ScriptEnvironment *env, AVS_Value clip,
     }
 
     const int crop = src_left == src_left && src_width == src_width; /* !NaN */
-    AVS_Value args[7];
-    const char *names[7];
+    AVS_Value args[8];
+    const char *names[8];
     int n = 4;
     args[0] = clip;                              names[0] = NULL;
     args[1] = avs_new_value_int(width);          names[1] = "width";
@@ -245,6 +274,13 @@ static AVS_Value comp_avs_zresize_f(AVS_ScriptEnvironment *env, AVS_Value clip,
     if (crop) {
         args[n] = avs_new_value_float((float)src_left);  names[n] = "src_left"; n++;
         args[n] = avs_new_value_float((float)src_width); names[n] = "src_width"; n++;
+        /* every resample here is horizontal-only, so `height` is also the
+         * source height. Halving a progressive clip would resample just its
+         * top half. */
+        if (comp_avs_clip_interlaced(env, clip)) {
+            args[n] = avs_new_value_float((float)(height / 2.0));
+            names[n] = "src_height"; n++;
+        }
     }
     if (resample_filter) {
         args[n] = avs_new_value_string(resample_filter); names[n] = "resample_filter"; n++;

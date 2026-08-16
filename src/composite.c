@@ -1153,7 +1153,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
 {
     vspapi->configPlugin("com.ifb.composite", "composite",
                          "PAL/NTSC composite video encoder/decoder",
-                         VS_MAKE_VERSION(0, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
+                         VS_MAKE_VERSION(0, 2), VAPOURSYNTH_API_VERSION, 0, plugin);
     vspapi->registerFunction("Encode",
                              "clip:vnode;"
                              "standard:data:opt;"

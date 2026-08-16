@@ -100,6 +100,53 @@ out486 = core.composite.Encode(
     core.std.BlankClip(format=vs.YUV420P8, width=720, height=486, length=1), standard='ntsc')
 assert (out486.width, out486.height) == (758, 486)
 
+# Interlaced 4:2:0 must not fold about the frame midline. The forward
+# resample is horizontal-only, but 4:2:0 -> 4:4:4 still upsamples chroma
+# vertically, so it runs field-wise off _FieldBased and a wrong active region
+# mirror-extends a 240-row field into a 480-row window. Only vertical
+# structure exposes that: a flat clip folds onto itself.
+ramp = np.repeat(np.linspace(16, 235, 480).astype(np.uint8)[:, None], 720, 1)
+ramp420 = core.std.BlankClip(format=vs.YUV420P8, width=720, height=480,
+                             length=1, fpsnum=30000, fpsden=1001)
+
+
+def _fill_ramp(n, f):
+    fo = f.copy()
+    np.asarray(fo[0])[:] = ramp
+    np.asarray(fo[1])[:] = 128
+    np.asarray(fo[2])[:] = 128
+    return fo
+
+
+ramp420 = core.std.ModifyFrame(ramp420, ramp420, _fill_ramp)
+for fb in (1, 2):
+    rest = core.composite.Restore(core.std.SetFrameProps(ramp420, _FieldBased=fb),
+                                  standard='ntsc', dimensions=1)
+    col = np.asarray(rest.get_frame(0)[0])[:, 360].astype(int)
+    assert col[440] > col[40] + 4096, (fb, col[40], col[440])
+    assert not (np.diff(col[8:473]) < -400).any(), ('mirror fold', fb)
+
+# per-field chroma must not blend across field lines: alternate the chroma
+# rows and check both values survive the 4:2:0 -> 4:4:4 upsample intact
+chroma420 = core.std.BlankClip(format=vs.YUV420P8, width=720, height=480,
+                               length=1, fpsnum=30000, fpsden=1001)
+
+
+def _fill_fields(n, f):
+    fo = f.copy()
+    np.asarray(fo[0])[:] = 126
+    for p in (1, 2):
+        a = np.asarray(fo[p])
+        a[0::2] = 64
+        a[1::2] = 192
+    return fo
+
+
+chroma420 = core.std.ModifyFrame(chroma420, chroma420, _fill_fields)
+up = core.resize.Spline36(core.std.SetFrameProps(chroma420, _FieldBased=2),
+                          format=vs.YUV444P16, width=758, height=480)
+assert set(np.asarray(up.get_frame(0)[1])[0:8, 300].tolist()) == {16384, 49152}
+
 # TFF and BFF content occupy different raster rows, so the composites differ
 flat480 = core.std.BlankClip(format=vs.YUV444P16, width=720, height=480, length=3,
                              fpsnum=30000, fpsden=1001, color=[32128, 40960, 28672])

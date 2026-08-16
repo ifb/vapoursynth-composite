@@ -230,6 +230,71 @@ int main(int argc, char **argv)
         fprintf(stderr, "note: avsresize not loaded — skipping resample paths\n");
     }
 
+    /* ---- interlaced 4:2:0 must not fold about the frame midline. Only
+     * subsampled and interlace-flagged input resamples field-wise, and only
+     * vertical structure exposes a mirror: a flat clip folds onto itself and
+     * every plane statistic stays put. Restore rather than Encode because
+     * Encode emits the modulated signal rather than the picture. */
+    if (have_resize) {
+        /* stacked bands rather than an expression: AviSynth's Expr has no
+         * row-coordinate term */
+        AVS_Value bands[60];
+        int nb = 0;
+        for (; nb < 60; nb++) {
+            char ey[32];
+            snprintf(ey, sizeof(ey), "%d", 16 + nb * 3);
+            bands[nb] = make_clip(720, 8, "YV12", 1, ey, "128", "128", 0);
+            if (avs_is_error(bands[nb])) {
+                CHECK(0, "ramp band %d: %s", nb, avs_as_string(bands[nb]));
+                break;
+            }
+        }
+        AVS_Value ramp = nb == 60 ? invoke("StackVertical", bands, 60)
+                                  : avs_new_value_error("bands");
+        CHECK(!avs_is_error(ramp), "ramp clip: %s", avs_as_string(ramp));
+        for (int i = 0; i < nb; i++)
+            avs_release_value(bands[i]);
+
+        /* avsresize keys off the frame prop, not the vi field flag */
+        AVS_Value pa[3] = { ramp, avs_new_value_string("_FieldBased"),
+                            avs_new_value_int(2) };
+        const char *pn[3] = { NULL, NULL, NULL };
+        AVS_Value tffp = comp("propSet", pa, pn, 3);
+        CHECK(!avs_is_error(tffp), "propSet: %s", avs_as_string(tffp));
+
+        AVS_Value ra[3] = { tffp, avs_new_value_string("ntsc"),
+                            avs_new_value_int(1) };
+        const char *rn[3] = { NULL, "standard", "dimensions" };
+        AVS_Value rest = comp("composite_Restore", ra, rn, 3);
+        CHECK(!avs_is_error(rest), "interlaced 420 restore: %s", avs_as_string(rest));
+        AVS_Clip *rc2 = first_clip(rest);
+        CHECK(rc2 != NULL, "interlaced 420 restore is not a clip");
+        if (rc2) {
+            AVS_VideoFrame *vf = avs_get_frame(rc2, 0);
+            const int pitch = avs_get_pitch_p(vf, AVS_PLANAR_Y) / 2;
+            const uint16_t *p = (const uint16_t *)avs_get_read_ptr_p(vf, AVS_PLANAR_Y);
+            int reversals = 0;
+            for (int y = 8; y < 472; y++) {
+                const int a = p[y * pitch + 360];
+                const int b = p[(y + 1) * pitch + 360];
+                if (b < a - 400)
+                    reversals++;
+            }
+            CHECK(reversals == 0,
+                  "interlaced 4:2:0 luma ramp reverses %d times (mirror fold)",
+                  reversals);
+            /* without this the reversal count passes on a flat frame */
+            CHECK(p[440 * pitch + 360] > p[40 * pitch + 360] + 4096,
+                  "ramp did not rise: top %d bottom %d",
+                  p[40 * pitch + 360], p[440 * pitch + 360]);
+            avs_release_video_frame(vf);
+            avs_release_clip(rc2);
+        }
+        avs_release_value(rest);
+        avs_release_value(tffp);
+        avs_release_value(ramp);
+    }
+
     /* ---- argument validation (no avsresize needed for the error paths) -- */
     AVS_Value bad = make_clip(720, 576, "YUV444P16", 1, "32128", "40960", "28672", 0);
     /* mask="confidence" needs eq=2 */
