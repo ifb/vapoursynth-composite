@@ -45,6 +45,8 @@ struct comp_avs_dec_t {
     int in_frames;   /* source clip length, for edge clamping */
     int mask_kind;   /* COMP_MASK_* : emit that mask as the YUVA alpha (0 none) */
     AVS_Clip *anchor; /* Restore: the raster picture for refine, else NULL */
+    int pad;          /* replicated columns either side of the raster for
+                       * the resample back; 0 at width=0 */
 };
 
 /* Where the picture sits in the raster, matching composite.c: a 480-line
@@ -108,6 +110,20 @@ static void AVSC_CC comp_avs_free(AVS_FilterInfo *fi)
     free(fi->user_data);
 }
 
+/* Replicate each row's first and last raster samples into the pad
+ * columns either side, matching composite.c's comp_fill_pad: the inverse
+ * resample overreads the active raster, and replicating the edge (rather
+ * than zimg's mirror) keeps interior picture off the frame edges. */
+static void comp_avs_fill_pad(uint16_t *p, ptrdiff_t stride, int rw, int pad, int h)
+{
+    for (int r = 0; r < h; r++, p += stride) {
+        for (int k = 0; k < pad; k++) {
+            p[k] = p[pad];
+            p[pad + rw + k] = p[pad + rw - 1];
+        }
+    }
+}
+
 static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
 {
     comp_avs_dec_t *f = fi->user_data;
@@ -135,6 +151,8 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
 
     AVS_VideoFrame *src = srcs[look];
     AVS_VideoFrame *dst = avs_new_video_frame_p(env, &fi->vi, src);
+    const int pad = f->pad;
+    const int rw = fi->vi.width - 2 * pad;  /* the raster */
 
     /* Restore: the raster anchor picture for the refine loop. It is
      * spatial (frame n only, always in range), unlike the composite
@@ -162,13 +180,21 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
                       views, view_frames, look,
                       anchor ? (const uint16_t *)avs_get_read_ptr_p(anchor, AVS_PLANAR_Y) : NULL,
                       anchor ? avs_get_pitch_p(anchor, AVS_PLANAR_Y) / 2 : 0,
-                      (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_Y),
+                      (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_Y) + pad,
                       avs_get_pitch_p(dst, AVS_PLANAR_Y) / 2,
-                      (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_U),
+                      (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_U) + pad,
                       avs_get_pitch_p(dst, AVS_PLANAR_U) / 2,
-                      (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_V),
+                      (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_V) + pad,
                       avs_get_pitch_p(dst, AVS_PLANAR_V) / 2,
-                      &mt, maskp, mask_stride, f->mask_kind);
+                      &mt, maskp ? maskp + pad : NULL, mask_stride, f->mask_kind);
+    if (pad) {
+        static const int planes[3] = { AVS_PLANAR_Y, AVS_PLANAR_U, AVS_PLANAR_V };
+        for (int p = 0; p < 3; p++)
+            comp_avs_fill_pad((uint16_t *)avs_get_write_ptr_p(dst, planes[p]),
+                              avs_get_pitch_p(dst, planes[p]) / 2, rw, pad, f->height);
+        if (maskp)
+            comp_avs_fill_pad(maskp, mask_stride, rw, pad, f->height);
+    }
 
     /* each difficulty prop exists only where its path is active. The
      * resample and the Restore edge-splice drop these downstream; the
@@ -391,56 +417,11 @@ static AVS_Value comp_avs_invoke_pos(AVS_ScriptEnvironment *env, const char *fn,
     return avs_invoke(env, fn, avs_new_value_array(a, n), NULL);
 }
 
-/* Horizontally pad `clip` with COMP_EDGE_PAD replicated edge columns each
- * side, matching composite.c's comp_pad_h: the inverse resample overreads
- * the active raster, and replicating the edge (rather than zimg's mirror)
- * keeps interior picture off the frame edges. Does not consume `clip`. */
-static AVS_Value comp_avs_pad_h(AVS_ScriptEnvironment *env, AVS_Value clip,
-                                const char *who)
-{
-    AVS_Clip *c = avs_take_clip(clip, env);
-    const int w = avs_get_video_info(c)->width;
-    const int h = avs_get_video_info(c)->height;
-    avs_release_clip(c);
-
-    AVS_Value cols[3];
-    /* left pad: leftmost column, then PointResize to COMP_EDGE_PAD wide */
-    {
-        AVS_Value crop[5] = { clip, avs_new_value_int(0), avs_new_value_int(0),
-                              avs_new_value_int(1), avs_new_value_int(0) };
-        AVS_Value col = comp_avs_invoke_pos(env, "Crop", crop, 5);
-        if (avs_is_error(col)) return col;
-        AVS_Value rs[3] = { col, avs_new_value_int(COMP_EDGE_PAD),
-                            avs_new_value_int(h) };
-        cols[0] = comp_avs_invoke_pos(env, "PointResize", rs, 3);
-        avs_release_value(col);
-        if (avs_is_error(cols[0])) return cols[0];
-    }
-    cols[1] = clip;
-    /* right pad: rightmost column, likewise */
-    {
-        AVS_Value crop[5] = { clip, avs_new_value_int(w - 1), avs_new_value_int(0),
-                              avs_new_value_int(1), avs_new_value_int(0) };
-        AVS_Value col = comp_avs_invoke_pos(env, "Crop", crop, 5);
-        if (avs_is_error(col)) { avs_release_value(cols[0]); return col; }
-        AVS_Value rs[3] = { col, avs_new_value_int(COMP_EDGE_PAD),
-                            avs_new_value_int(h) };
-        cols[2] = comp_avs_invoke_pos(env, "PointResize", rs, 3);
-        avs_release_value(col);
-        if (avs_is_error(cols[2])) { avs_release_value(cols[0]); return cols[2]; }
-    }
-
-    AVS_Value ret = comp_avs_invoke_pos(env, "StackHorizontal", cols, 3);
-    avs_release_value(cols[0]);
-    avs_release_value(cols[2]);
-    (void)who;
-    return ret;
-}
-
-/* Resample a raster YUV444P16 clip back to the caller's `out_width` x
- * `height` BT.601 raster: replicate-pad, then the inverse zimg crop. The
- * pad's COMP_EDGE_PAD offset is already folded into src_left by
- * comp_decode_resample_params. Does not consume `clip`. */
+/* Resample a padded raster YUV444P16 clip back to the caller's
+ * `out_width` x `height` BT.601 raster through the inverse zimg crop.
+ * The decode wrote COMP_EDGE_PAD replicated columns each side, whose
+ * offset comp_decode_resample_params folds into src_left. Does not
+ * consume `clip`. */
 static AVS_Value comp_avs_resample_back(AVS_ScriptEnvironment *env, AVS_Value clip,
                                         const char *who, int standard,
                                         int out_width, int height, int want_mask)
@@ -448,15 +429,9 @@ static AVS_Value comp_avs_resample_back(AVS_ScriptEnvironment *env, AVS_Value cl
     double dst_left, dst_width;
     comp_decode_resample_params(standard, out_width, &dst_left, &dst_width);
 
-    if (!want_mask) {
-        AVS_Value padded = comp_avs_pad_h(env, clip, who);
-        if (avs_is_error(padded))
-            return padded;
-        AVS_Value ret = comp_avs_zresize(env, padded, who, out_width, height,
-                                         "YUV444P16", dst_left, dst_width);
-        avs_release_value(padded);
-        return ret;
-    }
+    if (!want_mask)
+        return comp_avs_zresize(env, clip, who, out_width, height,
+                                "YUV444P16", dst_left, dst_width);
 
     /* mask="motion": the input is YUVA (alpha = the raster motion mask).
      * VS has one resampler per graph and z_ConvertFormat would apply the
@@ -470,20 +445,14 @@ static AVS_Value comp_avs_resample_back(AVS_ScriptEnvironment *env, AVS_Value cl
     AVS_Value mask = comp_avs_invoke_pos(env, "ExtractA", &clip, 1);
     if (avs_is_error(mask)) { avs_release_value(pic); return mask; }
 
-    AVS_Value pic_pad = comp_avs_pad_h(env, pic, who);
-    avs_release_value(pic);
-    if (avs_is_error(pic_pad)) { avs_release_value(mask); return pic_pad; }
-    AVS_Value pic_rs = comp_avs_zresize(env, pic_pad, who, out_width, height,
+    AVS_Value pic_rs = comp_avs_zresize(env, pic, who, out_width, height,
                                         "YUV444P16", dst_left, dst_width);
-    avs_release_value(pic_pad);
+    avs_release_value(pic);
     if (avs_is_error(pic_rs)) { avs_release_value(mask); return pic_rs; }
 
-    AVS_Value mask_pad = comp_avs_pad_h(env, mask, who);
-    avs_release_value(mask);
-    if (avs_is_error(mask_pad)) { avs_release_value(pic_rs); return mask_pad; }
-    AVS_Value mask_rs = comp_avs_zresize_f(env, mask_pad, who, out_width, height,
+    AVS_Value mask_rs = comp_avs_zresize_f(env, mask, who, out_width, height,
                                            "Y16", dst_left, dst_width, "bilinear");
-    avs_release_value(mask_pad);
+    avs_release_value(mask);
     if (avs_is_error(mask_rs)) { avs_release_value(pic_rs); return mask_rs; }
 
     AVS_Value comb[2] = { pic_rs, mask_rs };
@@ -819,6 +788,12 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     /* YUVA when a mask was requested (alpha carries the raster motion
      * mask; the resample splits it off, resamples bilinear, reattaches) */
     fi->vi.pixel_type = want_mask ? AVS_CS_YUVA444P16 : AVS_CS_YUV444P16;
+    /* the resample back reads past the raster; the decode writes the
+     * replicated columns it needs (width=0 returns the bare raster) */
+    if (width != 0) {
+        f->pad = COMP_EDGE_PAD;
+        fi->vi.width += 2 * COMP_EDGE_PAD;
+    }
     fi->get_frame = comp_avs_dec_get_frame;
     fi->set_cache_hints = comp_avs_dec_set_cache_hints;
     fi->free_filter = comp_avs_dec_free;
@@ -1179,6 +1154,10 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
         return avs_new_value_error(avs_save_string(env, msg, -1));
     }
     dfi->vi.pixel_type = want_mask ? AVS_CS_YUVA444P16 : AVS_CS_YUV444P16;
+    if (width != 0) {
+        df->pad = COMP_EDGE_PAD;
+        dfi->vi.width += 2 * COMP_EDGE_PAD;
+    }
     dfi->get_frame = comp_avs_dec_get_frame;
     dfi->set_cache_hints = comp_avs_dec_set_cache_hints;
     dfi->free_filter = comp_avs_dec_free;
