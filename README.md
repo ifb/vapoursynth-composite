@@ -295,8 +295,13 @@ ranges and constraints are in *Parameter reference* below.
   EBU 4fsc sampling), at the input height. The picture (and the `mask`
   output, which stays crisp) then come straight off the decode grid with
   no resize; these are non-square-pixel frames you resample yourself.
-  Note that setting `width` to the raster value (e.g. `758`) is *not* the
-  same - that still resamples; only `width=0` bypasses it.
+  The 4fsc active line is slightly shorter than BT.601's 720 samples, so
+  the raster ends a few columns short of a 720-wide frame at each edge
+  (NTSC 1 on the left and 5 on the right, PAL 6 and 7). At a resampled
+  width, `Restore` fills those columns from its input and `Decode`
+  repeats the raster's edge column. Note that setting `width` to the
+  raster value (e.g. `758`) is *not* the same - that still resamples;
+  only `width=0` bypasses it.
 - `dimensions` - `3` (default) spatio-temporal separation using
   neighboring frames; `2` fast 2D (spatial / line comb); `1` a crude
   notch reference (worst case).
