@@ -289,7 +289,9 @@ static void t3d_apply_c(float *out, const float *in, const float *g,
 /* Per-bin trained-LUT gain row: for each bin, the pair-symmetry ratio
  * r = lo/hi (1 when hi is 0) and the linear interpolation of that
  * bin's LUT row at r * (COMP_LUT_K - 1), knots uniform on [0, 1].
- * Arrays are padded so n may be rounded up to 16. */
+ * Arrays are padded so n may be rounded up to 16. The ratio pass holds
+ * the divide and has no lookups, so it vectorizes without gathers; the
+ * interpolation position waits in g for the lookup pass. */
 static void lut_gain_row_c(float *g, float *r, const float *m_in,
                            const float *m_ref,
                            const float (*lut)[COMP_LUT_K], int n)
@@ -297,12 +299,19 @@ static void lut_gain_row_c(float *g, float *r, const float *m_in,
     for (int i = 0; i < n; i++) {
         const float lo = m_in[i] < m_ref[i] ? m_in[i] : m_ref[i];
         const float hi = m_in[i] < m_ref[i] ? m_ref[i] : m_in[i];
-        const float ri = hi > 0.0f ? lo / hi : 1.0f;
-        const float pos = ri * (COMP_LUT_K - 1);
+        /* divided unconditionally: lo <= hi, so the hi == 0 lanes the
+         * select discards are 0/0, and compilers vectorize no divide
+         * they would have to guard */
+        const float q = lo / hi;
+        const float ri = hi > 0.0f ? q : 1.0f;
+        r[i] = ri;
+        g[i] = ri * (COMP_LUT_K - 1);
+    }
+    for (int i = 0; i < n; i++) {
+        const float pos = g[i];
         int k = (int)pos;
         if (k > COMP_LUT_K - 2)
             k = COMP_LUT_K - 2;
-        r[i] = ri;
         g[i] = lut[i][k] + (lut[i][k + 1] - lut[i][k]) * (pos - k);
     }
 }
