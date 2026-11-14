@@ -338,6 +338,7 @@ static void fft_inv_pal_avx2(float *real, float *band, unsigned ph)
 
 void comp_fft_x_rows_ntsc(float *band, const float *real, unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX2) {
         comp_fft_x_fwd_avx2(band, real, ZT * COMP_T3D_YTILE);
@@ -351,6 +352,7 @@ void comp_fft_x_rows_ntsc(float *band, const float *real, unsigned cpu)
 
 comp_fft_fwd_fn comp_get_fft_fwd_fn(int standard, unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX2)
         return standard == COMP_STD_PAL ? fft_fwd_pal_avx2 : fft_fwd_ntsc_avx2;
@@ -361,6 +363,7 @@ comp_fft_fwd_fn comp_get_fft_fwd_fn(int standard, unsigned cpu)
 
 comp_fft_inv_fn comp_get_fft_inv_fn(int standard, unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX2)
         return standard == COMP_STD_PAL ? fft_inv_pal_avx2 : fft_inv_ntsc_avx2;

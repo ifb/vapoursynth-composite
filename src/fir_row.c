@@ -49,6 +49,7 @@ FIR_ROW_S16_ASM(avx512);
 
 comp_fir_row_s16_fn comp_get_fir_row_s16_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_fir_row_s16_avx512;
@@ -63,6 +64,7 @@ comp_fir_row_s16_fn comp_get_fir_row_s16_fn(unsigned cpu)
 
 comp_fir_row_q15_fn comp_get_fir_row_q15_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_fir_row_q15_avx512;

@@ -130,6 +130,7 @@ ENCODE_MOD_ROW_ASM(avx512);
 
 comp_encode_mod_row_fn comp_get_encode_mod_row_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_encode_mod_row_avx512;

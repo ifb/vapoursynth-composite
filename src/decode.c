@@ -605,6 +605,7 @@ PAL_DEMOD_ROW_ASM(avx512);
 
 comp_pal_demod_fn comp_get_pal_demod_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_pal_demod_row_avx512;
@@ -810,6 +811,7 @@ NTSC_COMB2D_ROW_ASM(avx512);
 
 comp_ntsc_comb2d_row_fn comp_get_ntsc_comb2d_row_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_ntsc_comb2d_row_avx512;
@@ -892,6 +894,7 @@ _Static_assert(offsetof(comp_magic_t, base) == 8, "magic layout");
 
 comp_demod_quant_row_fn comp_get_demod_quant_row_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_demod_quant_row_avx512;
@@ -927,6 +930,7 @@ DEMOD_ROTATE_ROW_ASM(avx512);
 
 comp_demod_rotate_row_fn comp_get_demod_rotate_row_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_demod_rotate_row_avx512;
@@ -1003,6 +1007,7 @@ DEMOD_PQ_ROW_ASM(avx512);
 
 comp_demod_pq_row_fn comp_get_demod_pq_row_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_demod_pq_row_avx512;
@@ -1132,6 +1137,7 @@ _Static_assert(offsetof(comp_split3d_cand_t, bonus) == 40, "split3d cand layout"
 
 comp_split3d_row_fn comp_get_split3d_row_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX512)
         return comp_split3d_row_avx512;

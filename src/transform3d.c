@@ -94,7 +94,7 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
     t->lut_gain = comp_get_lut_gain_fn(comp_cpu_detect());
     t->t3d_mag = comp_get_t3d_mag_fn(comp_cpu_detect());
     t->t3d_apply = comp_get_t3d_apply_fn(comp_cpu_detect());
-    if (comp_cpu_detect() & COMP_CPU_AVX2) {
+    if ((comp_cpu_detect() | COMP_CPU_BUILTIN) & COMP_CPU_AVX2) {
         t->fft_fwd = comp_get_fft_fwd_fn(standard, comp_cpu_detect());
         t->fft_inv = comp_get_fft_inv_fn(standard, comp_cpu_detect());
     } else {
@@ -335,6 +335,7 @@ T3D_ROW_ASM(avx2);
 
 comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX2)
         return comp_lut_gain_avx2;
@@ -347,6 +348,7 @@ comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu)
 
 comp_t3d_mag_fn comp_get_t3d_mag_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX2)
         return comp_t3d_mag_avx2;
@@ -359,6 +361,7 @@ comp_t3d_mag_fn comp_get_t3d_mag_fn(unsigned cpu)
 
 comp_t3d_apply_fn comp_get_t3d_apply_fn(unsigned cpu)
 {
+    cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
     if (cpu & COMP_CPU_AVX2)
         return comp_t3d_apply_avx2;
