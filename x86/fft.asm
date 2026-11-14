@@ -360,14 +360,19 @@ SECTION .text
 ; transpose so every arithmetic op works on eight rows' same sample.
 ; Per row: pack 16 reals as 8 complex, DIF-8 (bit-reversed positions),
 ; untangle F[2..6] with e^{-2pi i k/16}, write one 64-byte band row
-; (columns 5..7 zero). Stack: 8 spill slots + F staging.
-%macro FFT_X_FWD 0
+; (columns 5..7 zero). Stack: 8 spill slots + F staging. fft_x_fwd2
+; takes every other row of real and band (128-byte pitch).
+%macro FFT_X_FWD 1 ; row pitch in bytes
+%if %1 == 64
 cglobal fft_x_fwd, 3, 4, 16, 512, band, real, nrows
+%else
+cglobal fft_x_fwd2, 3, 4, 16, 512, band, real, nrows
+%endif
 .block:
     ; first halves -> columns c0..c3, spilled
 %assign %%i 0
 %rep 8
-    movu         m %+ %%i, [realq + %%i*64]
+    movu         m %+ %%i, [realq + %%i*%1]
 %assign %%i %%i+1
 %endrep
     TRANSPOSE8X8
@@ -380,7 +385,7 @@ cglobal fft_x_fwd, 3, 4, 16, 512, band, real, nrows
     ; second halves -> c4..c7 in m0..m7
 %assign %%i 0
 %rep 8
-    movu         m %+ %%i, [realq + %%i*64 + 32]
+    movu         m %+ %%i, [realq + %%i*%1 + 32]
 %assign %%i %%i+1
 %endrep
     TRANSPOSE8X8
@@ -523,7 +528,7 @@ cglobal fft_x_fwd, 3, 4, 16, 512, band, real, nrows
 %assign %%i 0
 %rep 8
 %assign %%j %%i+8
-    movu         [bandq + %%i*64], m %+ %%j
+    movu         [bandq + %%i*%1], m %+ %%j
 %assign %%i %%i+1
 %endrep
     ; column 4 = F6 as per-row pairs, columns 5..7 zero
@@ -534,28 +539,29 @@ cglobal fft_x_fwd, 3, 4, 16, 512, band, real, nrows
     pxor         m4, m4
 %assign %%i 0
 %rep 8
-    movu         [bandq + %%i*64 + 32], m4
+    movu         [bandq + %%i*%1 + 32], m4
 %assign %%i %%i+1
 %endrep
-    movlps       [bandq + 0*64 + 32], xm2
-    movhps       [bandq + 1*64 + 32], xm2
-    movlps       [bandq + 2*64 + 32], xm3
-    movhps       [bandq + 3*64 + 32], xm3
+    movlps       [bandq + 0*%1 + 32], xm2
+    movhps       [bandq + 1*%1 + 32], xm2
+    movlps       [bandq + 2*%1 + 32], xm3
+    movhps       [bandq + 3*%1 + 32], xm3
     vextractf128 xm2, m2, 1
     vextractf128 xm3, m3, 1
-    movlps       [bandq + 4*64 + 32], xm2
-    movhps       [bandq + 5*64 + 32], xm2
-    movlps       [bandq + 6*64 + 32], xm3
-    movhps       [bandq + 7*64 + 32], xm3
-    add          realq, 8*64
-    add          bandq, 8*64
+    movlps       [bandq + 4*%1 + 32], xm2
+    movhps       [bandq + 5*%1 + 32], xm2
+    movlps       [bandq + 6*%1 + 32], xm3
+    movhps       [bandq + 7*%1 + 32], xm3
+    add          realq, 8*%1
+    add          bandq, 8*%1
     sub          nrowsd, 8
     jg .block
     RET
 %endmacro
 
 INIT_YMM avx2
-FFT_X_FWD
+FFT_X_FWD 64
+FFT_X_FWD 128
 
 ; void fft_x_inv(float *real, const float *band, int nrows)
 ;
@@ -563,18 +569,23 @@ FFT_X_FWD
 ; from the band columns (the 0.5 untangle scale and the final x2
 ; cancel exactly, both being powers of two), inverse DIT-8, and write
 ; 16 reals per row. Unnormalized, matching the forward's convention.
-%macro FFT_X_INV 0
+; fft_x_inv2 takes every other row (128-byte pitch).
+%macro FFT_X_INV 1 ; row pitch in bytes
+%if %1 == 64
 cglobal fft_x_inv, 3, 4, 16, 512, real, band, nrows
+%else
+cglobal fft_x_inv2, 3, 4, 16, 512, real, band, nrows
+%endif
 .block:
     ; column 4 (F6) pairs -> two column vectors, staged
-    movsd        xm0, [bandq + 0*64 + 32]
-    movhps       xm0, [bandq + 1*64 + 32]
-    movsd        xm1, [bandq + 2*64 + 32]
-    movhps       xm1, [bandq + 3*64 + 32]
-    movsd        xm2, [bandq + 4*64 + 32]
-    movhps       xm2, [bandq + 5*64 + 32]
-    movsd        xm3, [bandq + 6*64 + 32]
-    movhps       xm3, [bandq + 7*64 + 32]
+    movsd        xm0, [bandq + 0*%1 + 32]
+    movhps       xm0, [bandq + 1*%1 + 32]
+    movsd        xm1, [bandq + 2*%1 + 32]
+    movhps       xm1, [bandq + 3*%1 + 32]
+    movsd        xm2, [bandq + 4*%1 + 32]
+    movhps       xm2, [bandq + 5*%1 + 32]
+    movsd        xm3, [bandq + 6*%1 + 32]
+    movhps       xm3, [bandq + 7*%1 + 32]
     vinsertf128  m0, m0, xm2, 1
     vinsertf128  m1, m1, xm3, 1
     vshufps      m4, m0, m1, 0x88   ; F6r
@@ -584,7 +595,7 @@ cglobal fft_x_inv, 3, 4, 16, 512, real, band, nrows
     ; columns 0..3 -> F2..F5 column vectors
 %assign %%i 0
 %rep 8
-    movu         m %+ %%i, [bandq + %%i*64]
+    movu         m %+ %%i, [bandq + %%i*%1]
 %assign %%i %%i+1
 %endrep
     TRANSPOSE8X8                    ; m8..m15 = F2r F2i F3r F3i F4r F4i F5r F5i
@@ -626,14 +637,14 @@ cglobal fft_x_inv, 3, 4, 16, 512, real, band, nrows
     ; F2 = (m8,m9) was clobbered; reload from the band transpose is
     ; avoided by recomputing: F2/F4 columns were m8,m9 / m12,m13 --
     ; m12..m15 survived, m8..m11 did not. Reload columns 0,1.
-    movsd        xm8, [bandq + 0*64]
-    movhps       xm8, [bandq + 1*64]
-    movsd        xm9, [bandq + 2*64]
-    movhps       xm9, [bandq + 3*64]
-    movsd        xm10, [bandq + 4*64]
-    movhps       xm10, [bandq + 5*64]
-    movsd        xm11, [bandq + 6*64]
-    movhps       xm11, [bandq + 7*64]
+    movsd        xm8, [bandq + 0*%1]
+    movhps       xm8, [bandq + 1*%1]
+    movsd        xm9, [bandq + 2*%1]
+    movhps       xm9, [bandq + 3*%1]
+    movsd        xm10, [bandq + 4*%1]
+    movhps       xm10, [bandq + 5*%1]
+    movsd        xm11, [bandq + 6*%1]
+    movhps       xm11, [bandq + 7*%1]
     vinsertf128  m8, m8, xm10, 1
     vinsertf128  m9, m9, xm11, 1
     vshufps      m10, m8, m9, 0x88  ; F2r
@@ -726,7 +737,7 @@ cglobal fft_x_inv, 3, 4, 16, 512, real, band, nrows
 %assign %%i 0
 %rep 8
 %assign %%j %%i+8
-    movu         [realq + %%i*64], m %+ %%j
+    movu         [realq + %%i*%1], m %+ %%j
 %assign %%i %%i+1
 %endrep
 %assign %%i 0
@@ -738,15 +749,16 @@ cglobal fft_x_inv, 3, 4, 16, 512, real, band, nrows
 %assign %%i 0
 %rep 8
 %assign %%j %%i+8
-    movu         [realq + %%i*64 + 32], m %+ %%j
+    movu         [realq + %%i*%1 + 32], m %+ %%j
 %assign %%i %%i+1
 %endrep
-    add          realq, 8*64
-    add          bandq, 8*64
+    add          realq, 8*%1
+    add          bandq, 8*%1
     sub          nrowsd, 8
     jg .block
     RET
 %endmacro
 
 INIT_YMM avx2
-FFT_X_INV
+FFT_X_INV 64
+FFT_X_INV 128

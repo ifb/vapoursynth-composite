@@ -66,8 +66,14 @@ static void test_standard(int standard)
         rin[i] = (float)(rand() % 53248) * 0.5f;
 
     /* forward: band columns match FFTW at bit-reversed (kz, ky) */
+    /* NTSC: rows of the other field come from the black table; built
+     * from rin itself, the forward is then the whole transform */
+    const unsigned ph = 0x5A;
+    float *black = malloc(sizeof(float) * ZT * COMP_T3D_YTILE * COMP_FFT_ROWSTRIDE);
+    if (!pal)
+        comp_fft_x_rows_ntsc(black, rin, 0);
     fftwf_execute(pf);
-    fwd(band, rin);
+    fwd(band, rin, pal ? NULL : black, ph);
     double emax = 0.0, mmax = 0.0;
     for (int z = 0; z < ZT; z++)
         for (int y = 0; y < yt; y++)
@@ -98,9 +104,13 @@ static void test_standard(int standard)
                 m[1] = cf[i][1];
             }
     fftwf_execute(pi);
-    inv(rmine, band2);
+    inv(rmine, band2, ph);
     emax = 0.0; mmax = 0.0;
     for (int i = 0; i < nreal; i++) {
+        /* NTSC writes only each z's rows of parity bit z of ph */
+        const int z = i / (yt * XT), y = (i / XT) % yt;
+        if (!pal && (y & 1) != (int)((ph >> z) & 1))
+            continue;
         const double e = fabs(rmine[i] - rout[i]);
         if (e > emax) emax = e;
         if (fabs(rout[i]) > mmax) mmax = fabs(rout[i]);
@@ -111,7 +121,7 @@ static void test_standard(int standard)
     fftwf_destroy_plan(pf);
     fftwf_destroy_plan(pi);
     fftwf_free(rin); fftwf_free(rout); fftwf_free(cf); fftwf_free(cs);
-    free(band); free(band2); free(rmine);
+    free(band); free(band2); free(rmine); free(black);
 }
 
 int main(void)

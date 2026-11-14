@@ -29,7 +29,17 @@
  * the vector passes work on whole registers; columns NCOL..7 are zero */
 #define COMP_FFT_ROWSTRIDE COMP_T3D_XTILE
 
+/* NTSC tiles carry the other field's rows as black: for each z the
+ * picture rows sit at one y parity, bit z of ph. The forward takes the
+ * other rows' x spectra from black (the fixed spectra of those rows,
+ * from comp_fft_x_rows_ntsc) instead of transforming them, and the
+ * inverse leaves those rows of real unwritten. PAL tiles have no such
+ * rows; the PAL transforms ignore black and ph. */
 comp_fft_fwd_fn comp_get_fft_fwd_fn(int standard, unsigned cpu);
 comp_fft_inv_fn comp_get_fft_inv_fn(int standard, unsigned cpu);
+
+/* the x pass alone over every row of an NTSC real tile, with the same
+ * arithmetic the forward transform uses for the tier cpu selects */
+void comp_fft_x_rows_ntsc(float *band, const float *real, unsigned cpu);
 
 #endif

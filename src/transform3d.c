@@ -117,6 +117,15 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
 
     ALIGNED_32( float real[TILE_REAL] );
     ALIGNED_32( fftwf_complex cplx[TILE_CPLX] );
+    if (t->fft_fwd && standard == COMP_STD_NTSC) {
+        /* the rows an NTSC tile takes from the other field are black,
+         * exactly as build_slab_ntsc would fill them */
+        for (int z = 0; z < ZTILE; z++)
+            for (int y = 0; y < YTILE; y++)
+                for (int x = 0; x < XTILE; x++)
+                    real[(z * YTILE + y) * XTILE + x] = LEVEL_BLACK * t->window[z][y][x];
+        comp_fft_x_rows_ntsc(t->fft_black, real, comp_cpu_detect());
+    }
     pthread_mutex_lock(&planner_lock);
     t->forward = fftwf_plan_dft_r2c_3d(ZTILE, ytile, XTILE, real, cplx,
                                        FFTW_MEASURE);
@@ -833,6 +842,12 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
     const int tz = s->tz;
     const int parity = s->parity;
     const size_t plane = (size_t)field_rows * width;
+    /* bit z: the y parity of field tz + z's rows in every tile (tile_y
+     * is even); the internal FFT takes the other rows' spectra from
+     * t->fft_black, so they need no filling */
+    unsigned ph = 0;
+    for (int z = 0; z < ZTILE; z++)
+        ph |= (unsigned)((tz + z + parity) & 1) << z;
 
     memset(s->chroma, 0, sizeof(float) * ZTILE * plane);
     if (s->conf)
@@ -855,6 +870,8 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                 if (fv && !fv->data)
                     fv = NULL;
                 for (int y = 0; y < YTILE; y++) {
+                    if (use_fft && (y & 1) != (int)((ph >> z) & 1))
+                        continue;
                     const int fl = tile_y + y;
                     const int usable = fv && y >= start_y && y < end_y
                                        && ((fl + parity) & 1) == (g & 1);
@@ -877,11 +894,11 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
             }
             float w;
             if (use_fft) {
-                t->fft_fwd(cplx_in.band, real);
+                t->fft_fwd(cplx_in.band, real, t->fft_black, ph);
                 w = apply_filter_lut(t, cplx_in.band, cplx_out.band,
                                      t->rowpair_fft, t->special_fft,
                                      ZTILE * YTILE * COMP_FFT_ROWSTRIDE);
-                t->fft_inv(real, cplx_out.band);
+                t->fft_inv(real, cplx_out.band, ph);
             } else {
                 fftwf_execute_dft_r2c(t->forward, real, cplx_in.cplx);
                 w = t->use_lut
@@ -970,11 +987,11 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
             }
             float w;
             if (use_fft) {
-                t->fft_fwd(cplx_in.band, real);
+                t->fft_fwd(cplx_in.band, real, NULL, 0);
                 w = apply_filter_lut(t, cplx_in.band, cplx_out.band,
                                      t->rowpair_fft, t->special_fft,
                                      ZTILE * YTILE_PAL * COMP_FFT_ROWSTRIDE);
-                t->fft_inv(real, cplx_out.band);
+                t->fft_inv(real, cplx_out.band, 0);
             } else {
                 fftwf_execute_dft_r2c(t->forward, real, cplx_in.cplx);
                 w = t->use_lut

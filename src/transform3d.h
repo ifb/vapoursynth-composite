@@ -76,8 +76,9 @@ comp_t3d_apply_fn comp_get_t3d_apply_fn(unsigned cpu);
 
 /* internal-FFT entry points (see fft.h); stored here so the filter
  * can route per tile without an include cycle */
-typedef void (*comp_fft_fwd_fn)(float *band, const float *real);
-typedef void (*comp_fft_inv_fn)(float *real, float *band);
+typedef void (*comp_fft_fwd_fn)(float *band, const float *real,
+                                const float *black, unsigned ph);
+typedef void (*comp_fft_inv_fn)(float *real, float *band, unsigned ph);
 
 typedef struct {
     int bin;      /* linear bin index */
@@ -116,6 +117,10 @@ struct comp_transform3d_t {
     comp_t3d_special_t special_fft[8];
     comp_fft_fwd_fn fft_fwd;
     comp_fft_inv_fn fft_inv;
+    /* NTSC: the x spectra of black rows (LEVEL_BLACK times the window),
+     * band-row layout, for the rows an NTSC tile takes from the other
+     * field */
+    float fft_black[COMP_T3D_ZTILE * COMP_T3D_YTILE * COMP_T3D_XTILE];
 };
 
 /* PAL chroma on the displaced lattice is symmetric about the measured

@@ -16,6 +16,9 @@
 static CHECKASM_ALIGN(float rin[NREAL]);
 static CHECKASM_ALIGN(float band_c[NBAND]), band_a[NBAND];
 static CHECKASM_ALIGN(float rout_c[NREAL]), rout_a[NREAL];
+/* NTSC tiles take the other field's rows from fixed spectra; random
+ * ones here, so a mixed-up row shows */
+static CHECKASM_ALIGN(float black[NBAND]);
 
 static const int standards[] = { COMP_STD_PAL, COMP_STD_NTSC };
 
@@ -38,7 +41,7 @@ static void check_floats(const float *c, const float *a, int n, const char *what
 void checkasm_test_fft(void)
 {
     {
-        checkasm_declare(void, float *, const float *);
+        checkasm_declare(void, float *, const float *, const float *, unsigned);
         for (int s = 0; s < 2; s++) {
             const int pal = standards[s] == COMP_STD_PAL;
             const int yt = pal ? COMP_T3D_YTILE_PAL : COMP_T3D_YTILE;
@@ -47,20 +50,23 @@ void checkasm_test_fft(void)
                                     pal ? "fft_fwd_pal" : "fft_fwd_ntsc")) {
                 for (int i = 0; i < NREAL; i++)
                     rin[i] = (float)((int)(checkasm_rand() & 2047) - 1024);
+                for (int i = 0; i < NBAND; i++)
+                    black[i] = (float)((int)(checkasm_rand() & 2047) - 1024);
+                const unsigned ph = checkasm_rand() & 0xff;
                 memset(band_c, 0xaa, sizeof(band_c));
                 memset(band_a, 0xaa, sizeof(band_a));
-                checkasm_call_ref(band_c, rin);
-                checkasm_call_new(band_a, rin);
+                checkasm_call_ref(band_c, rin, black, ph);
+                checkasm_call_new(band_a, rin, black, ph);
                 for (int r = 0; r < ZT * yt; r++)
                     check_floats(band_c + r * COMP_FFT_ROWSTRIDE,
                                  band_a + r * COMP_FFT_ROWSTRIDE,
                                  COMP_FFT_NCOL * 2, "band");
-                checkasm_bench_new(band_a, rin);
+                checkasm_bench_new(band_a, rin, black, 0x55u);
             }
         }
     }
     {
-        checkasm_declare(void, float *, float *);
+        checkasm_declare(void, float *, float *, unsigned);
         for (int s = 0; s < 2; s++) {
             const int pal = standards[s] == COMP_STD_PAL;
             const int yt = pal ? COMP_T3D_YTILE_PAL : COMP_T3D_YTILE;
@@ -75,12 +81,15 @@ void checkasm_test_fft(void)
                 memcpy(band_a, band_c, sizeof(band_c));
                 memset(rout_c, 0xaa, sizeof(rout_c));
                 memset(rout_a, 0xaa, sizeof(rout_a));
-                /* the inverse consumes its input; each side gets a copy */
-                checkasm_call_ref(rout_c, band_c);
-                checkasm_call_new(rout_a, band_a);
+                /* the inverse consumes its input; each side gets a copy.
+                 * NTSC leaves the other field's rows unwritten, so they
+                 * keep the same fill on both sides. */
+                const unsigned ph = checkasm_rand() & 0xff;
+                checkasm_call_ref(rout_c, band_c, ph);
+                checkasm_call_new(rout_a, band_a, ph);
                 check_floats(rout_c, rout_a, ZT * yt * XT, "real");
                 memset(band_a, 0, sizeof(band_a));
-                checkasm_bench_new(rout_a, band_a);
+                checkasm_bench_new(rout_a, band_a, 0x55u);
             }
         }
     }
