@@ -51,7 +51,6 @@ static const float zero_line_f[WIDTH];
 
 #define COLORLP_TAPS COMP_DEMOD_PQ_TAPS
 static const int16_t colorlp_q15[COLORLP_TAPS] = { COMP_COLORLP_COEFS };
-static const int32_t colorlp_q15d[COLORLP_TAPS] = { COMP_COLORLP_COEFS };
 
 /* response of a symmetric FIR (Q15 taps) at normalized angular freq w */
 static double fir_response_q15(const int16_t *taps, int n, double w)
@@ -1236,37 +1235,28 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
                                uint16_t *dstv, ptrdiff_t vstride)
 {
     const int w = d->width;
-    const int half = COLORLP_TAPS / 2;
-    int32_t m[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COLORLP_TAPS - 1];
-    int32_t n[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COLORLP_TAPS - 1];
+    int16_t s[COMP_DEMOD_PQ_SPAN(COMP_ACTIVE_WIDTH_PAL)];
+    int16_t *est = s + COMP_DEMOD_PQ_WING;
 
-    memset(m, 0, sizeof(m));
-    memset(n, 0, sizeof(n));
+    memset(s, 0, sizeof(s));
     for (int r = 0; r < rows; r++) {
         const uint16_t *line = comp + r * comp_stride;
-        int32_t est[COMP_ACTIVE_WIDTH_PAL];
-        int32_t p_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
-        int32_t q_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+        int32_t p_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+        int32_t q_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
         int32_t u_row[COMP_ACTIVE_WIDTH_PAL], v_row[COMP_ACTIVE_WIDTH_PAL];
         int32_t u_eq[COMP_ACTIVE_WIDTH_PAL], v_eq[COMP_ACTIVE_WIDTH_PAL];
 
+        /* the numerator spans +-131070 over 16-bit samples, so the
+         * truncating quarter stays within +-32767 */
         est[0] = est[1] = est[w - 2] = est[w - 1] = 0;
         for (int x = 2; x < w - 2; x++)
-            est[x] = (2 * (int32_t)line[x] - line[x - 2] - line[x + 2]) / 4;
-
-        for (int x = 0; x < w; x++) {
-            const int32_t sn = (x & 3) == 1 ? 1 : (x & 3) == 3 ? -1 : 0;
-            const int32_t cs = (x & 3) == 0 ? 1 : (x & 3) == 2 ? -1 : 0;
-            m[half + x] = est[x] * sn;
-            n[half + x] = est[x] * cs;
-        }
+            est[x] = (int16_t)((2 * (int32_t)line[x] - line[x - 2] - line[x + 2]) / 4);
 
         const comp_sc_line_t sc = comp_sc_line(d->standard, frame, r + row_off);
         const int32_t sn0 = d->sin_q15[sc.phase];
         const int32_t cs0 = d->sin_q15[(sc.phase + d->den / 4) % d->den];
 
-        d->fir_row(p_row, m, colorlp_q15d, COLORLP_TAPS, w);
-        d->fir_row(q_row, n, colorlp_q15d, COLORLP_TAPS, w);
+        d->demod_pq_row(p_row, q_row, s, d->demod_pq_coef, w);
 
         int32_t yl_row[COMP_ACTIVE_WIDTH_PAL];
         for (int x = 0; x < w; x++) {
