@@ -669,6 +669,62 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 }
 
 
+/* Restore's edge splice: the resampled picture with its outermost nl
+ * and nr columns taken from the source, assembled in one copy. Frame
+ * props come from the leftmost part, as StackHorizontal took them. */
+typedef struct {
+    VSNode *res, *orig;
+    VSVideoInfo vi;
+    int nl, nr;
+} comp_splice_t;
+
+static const VSFrame *VS_CC comp_splice_get_frame(int n, int activation_reason, void *instance_data,
+                                                  void **frame_data, VSFrameContext *frame_ctx,
+                                                  VSCore *core, const VSAPI *vsapi)
+{
+    comp_splice_t *sp = instance_data;
+    (void)frame_data;
+
+    if (activation_reason == arInitial) {
+        vsapi->requestFrameFilter(n, sp->res, frame_ctx);
+        vsapi->requestFrameFilter(n, sp->orig, frame_ctx);
+        return NULL;
+    }
+    if (activation_reason != arAllFramesReady)
+        return NULL;
+
+    const VSFrame *res = vsapi->getFrameFilter(n, sp->res, frame_ctx);
+    const VSFrame *orig = vsapi->getFrameFilter(n, sp->orig, frame_ctx);
+    const int w = sp->vi.width, nl = sp->nl, nr = sp->nr;
+    VSFrame *dst = vsapi->newVideoFrame(&sp->vi.format, w, sp->vi.height,
+                                        nl ? orig : res, core);
+    for (int p = 0; p < sp->vi.format.numPlanes; p++) {
+        const ptrdiff_t ds = vsapi->getStride(dst, p) / 2;
+        const ptrdiff_t rs = vsapi->getStride(res, p) / 2;
+        const ptrdiff_t os = vsapi->getStride(orig, p) / 2;
+        uint16_t *dp = (uint16_t *)vsapi->getWritePtr(dst, p);
+        const uint16_t *rp = (const uint16_t *)vsapi->getReadPtr(res, p);
+        const uint16_t *op = (const uint16_t *)vsapi->getReadPtr(orig, p);
+        for (int y = 0; y < sp->vi.height; y++, dp += ds, rp += rs, op += os) {
+            memcpy(dp, op, sizeof(*dp) * nl);
+            memcpy(dp + nl, rp + nl, sizeof(*dp) * (w - nl - nr));
+            memcpy(dp + w - nr, op + w - nr, sizeof(*dp) * nr);
+        }
+    }
+    vsapi->freeFrame(res);
+    vsapi->freeFrame(orig);
+    return dst;
+}
+
+static void VS_CC comp_splice_free(void *instance_data, VSCore *core, const VSAPI *vsapi)
+{
+    comp_splice_t *sp = instance_data;
+    (void)core;
+    vsapi->freeNode(sp->res);
+    vsapi->freeNode(sp->orig);
+    free(sp);
+}
+
 /* Restore(): the whole noise-reduction round trip in one filter, with
  * optional Y-only Landweber refinement anchored to the input picture
  * (which Decode alone cannot see). */
@@ -1027,52 +1083,25 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         VSNode *orig = vsapi->mapGetNode(ret, "clip", 0, NULL);
         vsapi->freeMap(ret);
 
-        VSNode *parts[3] = { NULL, NULL, NULL };
-        int nparts = 0;
-        const struct { VSNode *from; int left, right; } cuts[3] = {
-            { orig, 0, width - nl },
-            { res_node, nl, nr },
-            { orig, width - nr, 0 },
-        };
-        int fail = 0;
-        for (int i = 0; i < 3; i++) {
-            if ((i == 0 && nl == 0) || (i == 2 && nr == 0))
-                continue;
-            args = vsapi->createMap();
-            vsapi->mapSetNode(args, "clip", cuts[i].from, maReplace);
-            if (cuts[i].left)
-                vsapi->mapSetInt(args, "left", cuts[i].left, maReplace);
-            if (cuts[i].right)
-                vsapi->mapSetInt(args, "right", cuts[i].right, maReplace);
-            ret = vsapi->invoke(std, "Crop", args);
-            vsapi->freeMap(args);
-            if (vsapi->mapGetError(ret)) {
-                vsapi->freeMap(ret);
-                fail = 1;
-                break;
-            }
-            parts[nparts++] = vsapi->mapGetNode(ret, "clip", 0, NULL);
-            vsapi->freeMap(ret);
+        comp_splice_t *sp = malloc(sizeof(*sp));
+        if (!sp) {
+            vsapi->freeNode(orig);
+            vsapi->freeNode(res_node);
+            vsapi->freeNode(conf_src);
+            vsapi->mapSetError(out, "Restore: out of memory");
+            return;
         }
-        vsapi->freeNode(orig);
-        vsapi->freeNode(res_node);
-        res_node = NULL;
-        if (!fail) {
-            args = vsapi->createMap();
-            for (int i = 0; i < nparts; i++)
-                vsapi->mapConsumeNode(args, "clips", parts[i], maAppend);
-            ret = vsapi->invoke(std, "StackHorizontal", args);
-            vsapi->freeMap(args);
-            if (vsapi->mapGetError(ret))
-                fail = 1;
-            else
-                res_node = vsapi->mapGetNode(ret, "clip", 0, NULL);
-            vsapi->freeMap(ret);
-        } else {
-            for (int i = 0; i < nparts; i++)
-                vsapi->freeNode(parts[i]);
-        }
-        if (fail || !res_node) {
+        sp->res = res_node;
+        sp->orig = orig;
+        sp->vi = *vsapi->getVideoInfo(res_node);
+        sp->nl = nl;
+        sp->nr = nr;
+        VSFilterDependency sdeps[] = {{ sp->res, rpStrictSpatial },
+                                      { sp->orig, rpStrictSpatial }};
+        res_node = vsapi->createVideoFilter2(name, &sp->vi, comp_splice_get_frame,
+                                             comp_splice_free, fmParallel, sdeps, 2,
+                                             sp, core);
+        if (!res_node) {
             vsapi->freeNode(conf_src);
             vsapi->mapSetError(out, "Restore: edge splice failed");
             return;
