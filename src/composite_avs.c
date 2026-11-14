@@ -243,6 +243,67 @@ static int comp_avs_clip_fieldwise(AVS_ScriptEnvironment *env, AVS_Value clip)
     return interlaced;
 }
 
+/* Whether this avsresize lets src_left/src_width overwrite the active
+ * height of a field-wise resample with the full frame height. Releases from
+ * r27 on halve the active region themselves, so pinning src_height to the
+ * field there would halve it twice. avsresize has no version query, so ask
+ * it directly: crop a black-over-white interlaced 4:2:0 clip horizontally
+ * only, and a folding build mirrors the black back into the bottom row. */
+static int comp_avs_fieldwise_crop_folds(AVS_ScriptEnvironment *env)
+{
+    enum { W = 16, H = 16 };
+    AVS_Value half[2];
+    for (int i = 0; i < 2; i++) {
+        AVS_Value a[5] = { avs_new_value_int(1), avs_new_value_int(W),
+                           avs_new_value_int(H / 2),
+                           avs_new_value_string("YV12"),
+                           avs_new_value_int(i ? 0xEB8080 : 0x108080) };
+        const char *an[5] = { "length", "width", "height", "pixel_type",
+                              "color_yuv" };
+        half[i] = avs_invoke(env, "BlankClip", avs_new_value_array(a, 5), an);
+        if (avs_is_error(half[i])) {
+            if (i)
+                avs_release_value(half[0]);
+            return 0;
+        }
+    }
+    AVS_Value stacked = avs_invoke(env, "StackVertical",
+                                   avs_new_value_array(half, 2), NULL);
+    avs_release_value(half[0]);
+    avs_release_value(half[1]);
+    if (avs_is_error(stacked))
+        return 0;
+
+    AVS_Value pa[3] = { stacked, avs_new_value_string("_FieldBased"),
+                        avs_new_value_int(2) };
+    AVS_Value tff = avs_invoke(env, "propSet", avs_new_value_array(pa, 3), NULL);
+    avs_release_value(stacked);
+    if (avs_is_error(tff))
+        return 0;
+
+    AVS_Value za[6] = { tff, avs_new_value_int(W), avs_new_value_int(H),
+                        avs_new_value_string("YV24"), avs_new_value_float(0.0f),
+                        avs_new_value_float((float)W) };
+    const char *zn[6] = { NULL, "width", "height", "pixel_type", "src_left",
+                          "src_width" };
+    AVS_Value out = avs_invoke(env, "z_ConvertFormat", avs_new_value_array(za, 6), zn);
+    avs_release_value(tff);
+    if (avs_is_error(out))
+        return 0;
+
+    int folds = 0;
+    AVS_Clip *c = avs_take_clip(out, env);
+    AVS_VideoFrame *f = avs_get_frame(c, 0);
+    if (f) {
+        const BYTE *p = avs_get_read_ptr_p(f, AVS_PLANAR_Y);
+        folds = p[(H - 1) * avs_get_pitch_p(f, AVS_PLANAR_Y)] < 128;
+        avs_release_video_frame(f);
+    }
+    avs_release_clip(c);
+    avs_release_value(out);
+    return folds;
+}
+
 /* z_ConvertFormat(clip, width=, height=, pixel_type=, src_left=,
  * src_width=): one zimg graph does the format conversion and the subpixel
  * crop-resize, the same fused operation the VS plugin gets from
@@ -253,12 +314,12 @@ static int comp_avs_clip_fieldwise(AVS_ScriptEnvironment *env, AVS_Value clip)
  * AVS_Value if avsresize is not installed.
  *
  * Interlaced sources resample field-wise, which keeps 4:2:0 chroma
- * upsampling from crossing field lines. avsresize halves the format height
- * for that but then lets src_left/src_width overwrite the active height back
- * to the full frame, so zimg reads a 480-row window out of a 240-row field
- * and mirror-extends the edge, folding the picture about its midline.
- * src_height is assigned from the same statement, so setting it pins the
- * active height to the field. */
+ * upsampling from crossing field lines. avsresize before r27 halves the
+ * format height for that but then lets src_left/src_width overwrite the
+ * active height back to the full frame, so zimg reads a 480-row window out
+ * of a 240-row field and mirror-extends the edge, folding the picture about
+ * its midline. src_height is assigned from the same statement, so on those
+ * builds setting it pins the active height to the field. */
 static AVS_Value comp_avs_zresize_f(AVS_ScriptEnvironment *env, AVS_Value clip,
                                     const char *who, int width, int height,
                                     const char *pixel_type,
@@ -288,7 +349,8 @@ static AVS_Value comp_avs_zresize_f(AVS_ScriptEnvironment *env, AVS_Value clip,
         /* every resample here is horizontal-only, so `height` is also the
          * source height. Halving it on a clip resampled as a whole frame
          * would resample just its top half. */
-        if (comp_avs_clip_fieldwise(env, clip)) {
+        if (comp_avs_clip_fieldwise(env, clip) &&
+            comp_avs_fieldwise_crop_folds(env)) {
             args[n] = avs_new_value_float((float)(height / 2.0));
             names[n] = "src_height"; n++;
         }
