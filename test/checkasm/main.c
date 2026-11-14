@@ -8,6 +8,7 @@ void checkasm_test_split3d(void);
 void checkasm_test_comb2d(void);
 void checkasm_test_demod_quant(void);
 void checkasm_test_demod_rotate(void);
+void checkasm_test_demod_pq(void);
 void checkasm_test_encode_mod(void);
 void checkasm_test_lut_gain(void);
 void checkasm_test_t3d_filter(void);
@@ -28,6 +29,7 @@ static const CheckasmTest tests[] = {
     { "comb2d", checkasm_test_comb2d },
     { "demod_quant", checkasm_test_demod_quant },
     { "demod_rotate", checkasm_test_demod_rotate },
+    { "demod_pq", checkasm_test_demod_pq },
     { "encode_mod", checkasm_test_encode_mod },
     { "lut_gain", checkasm_test_lut_gain },
     { "t3d_filter", checkasm_test_t3d_filter },

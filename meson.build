@@ -48,7 +48,8 @@ if host_machine.cpu_family() == 'x86_64'
                           'x86/split3d.asm', 'x86/lut_gain.asm',
                           'x86/t3d_filter.asm', 'x86/comb2d.asm',
                           'x86/demod_quant.asm', 'x86/demod_rotate.asm',
-                          'x86/encode_mod.asm', 'x86/fft.asm')
+                          'x86/encode_mod.asm', 'x86/fft.asm',
+                          'x86/demod_pq.asm')
 endif
 
 # decode.c's float separation heuristics feed discrete candidate choices
@@ -155,7 +156,8 @@ if checkasm_dep.found()
         files('test/checkasm/main.c', 'test/checkasm/pal_demod.c',
               'test/checkasm/fir_row.c', 'test/checkasm/split3d.c',
               'test/checkasm/comb2d.c', 'test/checkasm/demod_quant.c',
-              'test/checkasm/demod_rotate.c', 'test/checkasm/encode_mod.c',
+              'test/checkasm/demod_rotate.c', 'test/checkasm/demod_pq.c',
+              'test/checkasm/encode_mod.c',
               'test/checkasm/lut_gain.c',
               'test/checkasm/t3d_filter.c', 'test/checkasm/fft.c'),
         dependencies: [checkasm_dep] + core_deps,

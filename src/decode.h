@@ -115,6 +115,37 @@ typedef void (*comp_demod_rotate_row_fn)(int32_t *u, int32_t *v,
 
 comp_demod_rotate_row_fn comp_get_demod_rotate_row_fn(unsigned cpu);
 
+/* Demod products: the 17-tap color low-pass of the chroma times the
+ * 4xfsc carriers sn = {0,1,0,-1} and cs = {1,0,-1,0} [x & 3],
+ *   p[x] = (sum_j h[j] * s[x+j] * sn(x+j) + 16384) >> 15
+ * and q likewise with cs, s being the chroma row behind
+ * COMP_DEMOD_PQ_WING zeros. Each tap feeds exactly one of the two
+ * (x + j odd: p), so the taps split by parity, the carrier sign folds
+ * into per-phase coefficients (comp_demod_pq_init), and taps j, j+2 of
+ * one parity pair up over int16 samples. sum|h| * 2^15 < 2^31 - 2^14
+ * keeps every sum in int32, so all tiers are byte-identical. */
+#define COMP_DEMOD_PQ_TAPS  17
+/* that low-pass: deemp.h c_colorlp_b rounded to Q15, keeping the
+ * reference's +0.2% DC gain */
+#define COMP_COLORLP_COEFS \
+    73, 317, 200, -682, -1597, -503, 3726, 9094, 11579, \
+    9094, 3726, -503, -1597, -682, 200, 317, 73
+#define COMP_DEMOD_PQ_WING  (COMP_DEMOD_PQ_TAPS / 2)
+#define COMP_DEMOD_PQ_PAIRS 9
+/* p and q are written through ALIGN(w), s is read through SPAN(w) */
+#define COMP_DEMOD_PQ_ALIGN(w) (((w) + 31) & ~31)
+#define COMP_DEMOD_PQ_SPAN(w)  (COMP_DEMOD_PQ_ALIGN(w) + COMP_DEMOD_PQ_TAPS + 1)
+
+typedef void (*comp_demod_pq_row_fn)(int32_t *p, int32_t *q, const int16_t *s,
+                                     const int16_t (*coef)[32], int w);
+
+comp_demod_pq_row_fn comp_get_demod_pq_row_fn(unsigned cpu);
+
+/* per-pair coefficient rows, one (h[j], h[j+2]) word pair per lane of a
+ * 64-byte row, signed by the lane's carrier phase */
+void comp_demod_pq_init(int16_t coef[COMP_DEMOD_PQ_PAIRS][32],
+                        const int16_t *taps);
+
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
 struct comp_decode_scratch_t {
@@ -196,6 +227,8 @@ struct comp_decode_t {
     comp_ntsc_comb2d_row_fn comb2d_row;
     comp_demod_quant_row_fn demod_quant_row;
     comp_demod_rotate_row_fn demod_rotate_row;
+    comp_demod_pq_row_fn demod_pq_row;
+    int16_t demod_pq_coef[COMP_DEMOD_PQ_PAIRS][32];
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
     comp_t3d_cache_t t3cache;    /* 3D transform slab cache */

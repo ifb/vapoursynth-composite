@@ -49,14 +49,9 @@
 static const int16_t zero_line[WIDTH];
 static const float zero_line_f[WIDTH];
 
-/* color low-pass for the demodulated NTSC products (deemp.h
- * c_colorlp_b rounded to Q15; the reference's +0.2% DC gain is kept) */
-#define COLORLP_TAPS 17
-#define COLORLP_COEFS \
-    73, 317, 200, -682, -1597, -503, 3726, 9094, 11579, \
-    9094, 3726, -503, -1597, -682, 200, 317, 73
-static const int16_t colorlp_q15[COLORLP_TAPS] = { COLORLP_COEFS };
-static const int32_t colorlp_q15d[COLORLP_TAPS] = { COLORLP_COEFS };
+#define COLORLP_TAPS COMP_DEMOD_PQ_TAPS
+static const int16_t colorlp_q15[COLORLP_TAPS] = { COMP_COLORLP_COEFS };
+static const int32_t colorlp_q15d[COLORLP_TAPS] = { COMP_COLORLP_COEFS };
 
 /* response of a symmetric FIR (Q15 taps) at normalized angular freq w */
 static double fir_response_q15(const int16_t *taps, int n, double w)
@@ -203,6 +198,8 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->luma_den = enc.luma_num;
     d->demod_quant_row = comp_get_demod_quant_row_fn(comp_cpu_detect());
     d->demod_rotate_row = comp_get_demod_rotate_row_fn(comp_cpu_detect());
+    d->demod_pq_row = comp_get_demod_pq_row_fn(comp_cpu_detect());
+    comp_demod_pq_init(d->demod_pq_coef, colorlp_q15);
     comp_magic_init(&d->mag_y, d->luma_num, d->luma_den, 4096);
     comp_magic_init(&d->mag_u, 32768, d->ku, 32768);
     comp_magic_init(&d->mag_v, 32768, d->kv, 32768);
@@ -900,6 +897,63 @@ comp_demod_rotate_row_fn comp_get_demod_rotate_row_fn(unsigned cpu)
     return demod_rotate_row_c;
 }
 
+/* the pairs' first taps: even j, then odd j */
+static const int demod_pq_j[COMP_DEMOD_PQ_PAIRS] = { 0, 4, 8, 12, 16, 1, 5, 9, 13 };
+
+void comp_demod_pq_init(int16_t coef[COMP_DEMOD_PQ_PAIRS][32],
+                        const int16_t *taps)
+{
+    static const int sign[4] = { 1, 1, -1, -1 };  /* sn + cs */
+    for (int i = 0; i < COMP_DEMOD_PQ_PAIRS; i++) {
+        const int j = demod_pq_j[i];
+        for (int l = 0; l < 16; l++) {
+            const int ph = l & 3;
+            coef[i][2 * l] = (int16_t)(taps[j] * sign[(ph + j) & 3]);
+            coef[i][2 * l + 1] = j + 2 < COMP_DEMOD_PQ_TAPS
+                ? (int16_t)(taps[j + 2] * sign[(ph + j + 2) & 3]) : 0;
+        }
+    }
+}
+
+/* C reference for the dispatched demod products; see decode.h */
+static void demod_pq_row_c(int32_t *p, int32_t *q, const int16_t *s,
+                           const int16_t (*coef)[32], int w)
+{
+    for (int x = 0; x < w; x++) {
+        const int ph = 2 * (x & 3);
+        int32_t acc[2] = { 0, 0 };  /* even-j, odd-j taps */
+        for (int i = 0; i < COMP_DEMOD_PQ_PAIRS; i++) {
+            const int j = demod_pq_j[i];
+            acc[j & 1] += coef[i][ph] * s[x + j] + coef[i][ph + 1] * s[x + j + 2];
+        }
+        p[x] = (acc[!(x & 1)] + 16384) >> 15;
+        q[x] = (acc[x & 1] + 16384) >> 15;
+    }
+}
+
+#if defined(__x86_64__)
+#define DEMOD_PQ_ROW_ASM(isa)                                               \
+    void comp_demod_pq_row_##isa(int32_t *p, int32_t *q, const int16_t *s,  \
+                                 const int16_t (*coef)[32], int w)
+DEMOD_PQ_ROW_ASM(sse4);
+DEMOD_PQ_ROW_ASM(avx2);
+DEMOD_PQ_ROW_ASM(avx512);
+#endif
+
+comp_demod_pq_row_fn comp_get_demod_pq_row_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_demod_pq_row_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_demod_pq_row_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_demod_pq_row_sse4;
+#endif
+    (void)cpu;
+    return demod_pq_row_c;
+}
+
 /* line phase parity, matching the reference's getLinePhase: the NTSC
  * subcarrier advances half a cycle per broadcast line, so the parity of
  * the line count within the color sequence selects one of the two
@@ -1074,20 +1128,12 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
                             uint16_t *outy, uint16_t *outu, uint16_t *outv)
 {
     const int w = d->width;
-    const int half = COLORLP_TAPS / 2;
-    int32_t m[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC) + COLORLP_TAPS - 1];
-    int32_t n[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC) + COLORLP_TAPS - 1];
-    int32_t p_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
-    int32_t q_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+    int16_t s[COMP_DEMOD_PQ_SPAN(COMP_ACTIVE_WIDTH_NTSC)];
+    int32_t p_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+    int32_t q_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
 
-    memset(m, 0, sizeof(m));
-    memset(n, 0, sizeof(n));
-    for (int x = 0; x < w; x++) {
-        const int32_t sn = (x & 3) == 1 ? 1 : (x & 3) == 3 ? -1 : 0;
-        const int32_t cs = (x & 3) == 0 ? 1 : (x & 3) == 2 ? -1 : 0;
-        m[half + x] = chroma_row[x] * sn;
-        n[half + x] = chroma_row[x] * cs;
-    }
+    memset(s, 0, sizeof(s));
+    memcpy(s + COMP_DEMOD_PQ_WING, chroma_row, sizeof(*chroma_row) * w);
 
     const comp_sc_line_t sc = comp_sc_line(d->standard, frame, raster_row);
     const int32_t sn0 = d->sin_q15[sc.phase];
@@ -1099,8 +1145,7 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     int32_t u_row[COMP_ACTIVE_WIDTH_NTSC], v_row[COMP_ACTIVE_WIDTH_NTSC];
     int32_t u_eq[COMP_ACTIVE_WIDTH_NTSC], v_eq[COMP_ACTIVE_WIDTH_NTSC];
 
-    d->fir_row(p_row, m, colorlp_q15d, COLORLP_TAPS, w);
-    d->fir_row(q_row, n, colorlp_q15d, COLORLP_TAPS, w);
+    d->demod_pq_row(p_row, q_row, s, d->demod_pq_coef, w);
 
     d->demod_rotate_row(u_row, v_row, p_row, q_row, bpq, w);
 
