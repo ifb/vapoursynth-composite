@@ -10,8 +10,13 @@ cc = meson.get_compiler('c')
 
 # libm calls stay bit-exact without errno; keeping them errno-free lets
 # the vectorizers treat lrintf and friends as pure and vectorize the
-# quantization loops
-add_project_arguments(cc.get_supported_arguments('-fno-math-errno'), language: 'c')
+# quantization loops. Nothing here reads the floating-point exception
+# flags, and gcc's default -ftrapping-math keeps it from turning a float
+# compare-select into branch-free code (no vectorized loop); dropping it
+# changes no result, as it licenses neither reassociation nor contraction.
+add_project_arguments(cc.get_supported_arguments('-fno-math-errno',
+                                                 '-fno-trapping-math'),
+                      language: 'c')
 
 py = import('python').find_installation(pure: false)
 
