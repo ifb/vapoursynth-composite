@@ -1023,44 +1023,77 @@ static void split3d_row_c(int16_t *out, const float *c1c, const float *c2c,
                           const uint16_t *ref, const comp_split3d_cand_t *cand,
                           const double *irescale, int w)
 {
-    static const double weights[3] = { 0.5, 1.0, 0.5 };
+    enum { CHUNK = 64 };
 
-    for (int x = 3; x < w - 3; x++) {
-        double best_penalty = 0.0;
-        float best_sample = 0.0f;
-        int best = -1;
+    /* candidates outer, samples inner: the have_sample/have_penalty
+     * cases are per candidate, so each runs as its own branch-free
+     * sample loop, and the running best per sample keeps the scan order
+     * (the first candidate, then strictly smaller penalties) */
+    for (int x0 = 3; x0 < w - 3; x0 += CHUNK) {
+        const int n = w - 3 - x0 < CHUNK ? w - 3 - x0 : CHUNK;
+        double best_penalty[CHUNK];
+        float best_sample[CHUNK];
+        uint8_t best_same[CHUNK];  /* best < 4 */
 
         for (int i = 0; i < 8; i++) {
-            const int ch = x + cand[i].off;
-            double penalty = 1000.0;
-            float sample = 0.0f;
+            double penalty[CHUNK];
+            float sample[CHUNK];
+            const int off = x0 + cand[i].off;
 
-            if (cand[i].have_sample) {
-                sample = cand[i].c1[ch];
-                if (cand[i].have_penalty) {
+            if (!cand[i].have_sample) {
+                for (int x = 0; x < n; x++) {
+                    penalty[x] = 1000.0;
+                    sample[x] = 0.0f;
+                }
+            } else if (!cand[i].have_penalty) {
+                for (int x = 0; x < n; x++) {
+                    penalty[x] = 1000.0;
+                    sample[x] = cand[i].c1[off + x];
+                }
+            } else {
+                const float *c1 = cand[i].c1 + off;
+                const float *c2 = cand[i].c2 + off;
+                const uint16_t *line = cand[i].line + off;
+                const double bonus = cand[i].bonus;
+                for (int x = 0; x < n; x++) {
                     double ypen = 0.0, iqpen = 0.0;
                     for (int o = -1; o <= 1; o++) {
-                        const double ref_c = c2c[x + o];
-                        const double cand_c = cand[i].c2[ch + o];
-                        ypen += fabs((ref[x + o] - ref_c)
-                                     - (cand[i].line[ch + o] - cand_c));
-                        iqpen += fabs(ref_c + cand_c) * weights[o + 1];
+                        const double ref_c = c2c[x0 + x + o];
+                        const double cand_c = c2[x + o];
+                        ypen += fabs((ref[x0 + x + o] - ref_c)
+                                     - (line[x + o] - cand_c));
+                        iqpen += fabs(ref_c + cand_c) * (o ? 0.5 : 1.0);
                     }
-                    penalty = ypen / 3.0 / *irescale
-                            + (iqpen / 2.0 / *irescale) * 0.28
-                            + cand[i].bonus;
+                    penalty[x] = ypen / 3.0 / *irescale
+                               + (iqpen / 2.0 / *irescale) * 0.28
+                               + bonus;
+                    sample[x] = c1[x];
                 }
             }
 
-            if (best < 0 || penalty < best_penalty) {
-                best = i;
-                best_penalty = penalty;
-                best_sample = sample;
+            if (i == 0) {
+                for (int x = 0; x < n; x++) {
+                    best_penalty[x] = penalty[x];
+                    best_sample[x] = sample[x];
+                    best_same[x] = 1;
+                }
+                continue;
+            }
+            /* unconditional stores through selects, so the update
+             * compiles without branches on the penalty compare */
+            for (int x = 0; x < n; x++) {
+                const int take = penalty[x] < best_penalty[x];
+                best_penalty[x] = take ? penalty[x] : best_penalty[x];
+                best_sample[x] = take ? sample[x] : best_sample[x];
+                best_same[x] = take ? i < 4 : best_same[x];
             }
         }
 
-        const float tc = best < 4 ? c2c[x] : (c1c[x] - best_sample) / 2.0f;
-        out[x] = clamp_i16(lrintf(tc));
+        for (int x = 0; x < n; x++) {
+            const float tc = best_same[x] ? c2c[x0 + x]
+                                          : (c1c[x0 + x] - best_sample[x]) / 2.0f;
+            out[x0 + x] = clamp_i16(lrintf(tc));
+        }
     }
 }
 
