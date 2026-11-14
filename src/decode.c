@@ -1383,7 +1383,10 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
     uint16_t *est = s->refine;                   /* current YUV estimate */
     uint16_t *comp2 = s->refine + 3 * plane;     /* recomposite */
     uint16_t *cru = s->refine + 4 * plane;       /* crude Y of recomposite */
-    double residual_sum = 0.0;
+    /* the |difference| sums are integers under rows * w * 65535 < 2^53,
+     * so an integer total is the exact value a double running sum takes,
+     * and integer accumulation leaves the loops vectorizable */
+    int64_t residual_sum = 0;
 
     for (int r = 0; r < rows; r++) {
         memcpy(est + r * w, dsty + r * ystride, sizeof(uint16_t) * w);
@@ -1393,7 +1396,7 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
 
     for (int it = 0; it < d->refine; it++) {
         const int last = it == d->refine - 1;
-        residual_sum = 0.0;
+        residual_sum = 0;
         for (int r = 0; r < rows; r++)
             comp_encode_line(&d->enc, comp2 + r * w,
                              est + r * w, est + plane + r * w, est + 2 * plane + r * w,
@@ -1415,7 +1418,7 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
 
     /* correction magnitude: how far the loop moved luma from the decode
      * (dsty still holds the pre-refine luma until we overwrite it below) */
-    double correction_sum = 0.0;
+    int64_t correction_sum = 0;
     for (int r = 0; r < rows; r++) {
         const uint16_t *in = dsty + r * ystride;
         const uint16_t *ey = est + r * w;
@@ -1429,9 +1432,9 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
         memcpy(dsty + r * ystride, est + r * w, sizeof(uint16_t) * w);
 
     if (out_residual)
-        *out_residual = residual_sum / ((double)rows * w);
+        *out_residual = (double)residual_sum / ((double)rows * w);
     if (out_correction)
-        *out_correction = correction_sum / ((double)rows * w);
+        *out_correction = (double)correction_sum / ((double)rows * w);
 }
 
 void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
