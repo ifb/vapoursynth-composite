@@ -35,11 +35,6 @@ static const int16_t uv_taps_ntsc[9] = {
 #define KB 0.49211104112248356308804691718185
 #define KR 0.87728321993817866838972487283129
 
-static inline int32_t rdiv32(int64_t num, int32_t den)
-{
-    return (int32_t)((num >= 0 ? num + den / 2 : num - den / 2) / den);
-}
-
 int comp_encode_init(comp_encode_t *e, int standard, int setup, int precomb)
 {
     e->precomb = !!precomb;
@@ -78,6 +73,16 @@ int comp_encode_init(comp_encode_t *e, int standard, int setup, int precomb)
         e->luma_num = (level_white - e->level_black) / 128;
         e->luma_den = 438;
     }
+
+    /* the slope's round-half-away divide as a multiply:
+     * |q| = (|y - 4096| * mul + add) >> 31 with mul = ceil(num * 2^31 /
+     * den), add = round(floor(den/2) * 2^31 / den). Exact for every
+     * 16-bit input under the three slopes above. */
+    const uint64_t num31 = (uint64_t)e->luma_num << 31;
+    const uint64_t half31 = (uint64_t)(e->luma_den / 2) << 31;
+    e->luma_mul = (uint32_t)(num31 / e->luma_den + (num31 % e->luma_den != 0));
+    e->luma_add = (uint32_t)(half31 / e->luma_den
+                             + (half31 % e->luma_den * 2 >= (uint64_t)e->luma_den));
 
     /* chroma level per full-excursion Cb/Cr LSB, Q15 */
     const double span = level_white - e->level_black;
@@ -170,13 +175,14 @@ void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
     const int32_t c4[4] = { sc.vswitch * cs, -sc.vswitch * sn,
                             -sc.vswitch * cs, sc.vswitch * sn };
 
-    /* the luma level-map keeps its per-sample divide (negligible in the
-     * profile) scalar; chroma = U sin(a) + V cos(a) Vsw [Clarke 3.1/3.3]
-     * plus the add and clamp are the vectorized pass */
+    /* the luma level-map stays scalar; chroma = U sin(a) + V cos(a) Vsw
+     * [Clarke 3.1/3.3] plus the add and clamp are the vectorized pass */
     int32_t luma[COMP_ACTIVE_WIDTH_PAL];
     for (int x = 0; x < w; x++) {
         const int32_t yl = srcy[x] - 4096;
-        luma[x] = e->level_black + rdiv32((int64_t)yl * e->luma_num, e->luma_den);
+        const uint32_t ay = yl < 0 ? (uint32_t)-yl : (uint32_t)yl;
+        const int32_t q = (int32_t)(((uint64_t)ay * e->luma_mul + e->luma_add) >> 31);
+        luma[x] = e->level_black + (yl < 0 ? -q : q);
     }
     e->mod_row(dst, luma, uf, vf, e->ku, e->kv, s4, c4, w);
 }

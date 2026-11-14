@@ -21,8 +21,7 @@
  *   dst[x] = clamp(luma[x] + ((cu*s4[x&3] + cv*c4[x&3] + 16384) >> 15),
  *                  COMP_LEVEL_MIN, COMP_LEVEL_MAX)
  * s4/c4 are the 4-sample carrier sign pattern (absolute phase, x = 0 at
- * the first sample). luma is the level-mapped Y (scalar; its per-sample
- * divide is negligible). All arithmetic is int32 -- the intermediates
+ * the first sample). luma is the level-mapped Y (scalar). All arithmetic is int32 -- the intermediates
  * fit for the encoder's chroma range -- so the SIMD tiers are
  * byte-identical. */
 typedef void (*comp_encode_mod_row_fn)(uint16_t *dst, const int32_t *luma,
@@ -47,6 +46,7 @@ struct comp_encode_t {
     int32_t ku, kv;              /* chroma level per Cb/Cr LSB, Q15 */
     int32_t level_black;
     int32_t luma_num, luma_den;  /* level = black + (y - 4096) * num/den */
+    uint32_t luma_mul, luma_add; /* that divide as a multiply-shift */
     int16_t sin_q15[COMP_SC_DEN_PAL];
 };
 
