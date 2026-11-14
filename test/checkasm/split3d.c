@@ -70,10 +70,18 @@ void checkasm_test_split3d(void)
                      const double *, int);
     if (checkasm_check_func(comp_get_split3d_row_fn(checkasm_get_cpu_flags()),
                             "split3d_row")) {
-        for (int i = 0; i < 2 * NWIDTHS; i++) {
+        /* the decoder's comb_krange / 45, without and with setup */
+        const double prod[2] = { 16128.0 / 45.0, 14918.0 / 45.0 };
+        for (int i = 0; i < 6 * NWIDTHS; i++) {
             const int w = widths[i % NWIDTHS];
-            const double irescale = 1.0 + (double)(checkasm_rand() % 400) / 100.0;
+            const int kind = (i / NWIDTHS) % 3;
+            const double irescale = kind == 2
+                ? 1.0 + (double)(checkasm_rand() % 400) / 100.0 : prod[kind];
             fill_inputs(cand, i & 1);
+            /* every candidate scored, so every lane divides */
+            if (i >= 3 * NWIDTHS)
+                for (int k = 0; k < 8; k++)
+                    cand[k].have_sample = cand[k].have_penalty = 1;
             /* the same pattern in both, so untouched edges compare too */
             memset(out_c, 0x77, sizeof(out_c));
             memset(out_a, 0x77, sizeof(out_a));
