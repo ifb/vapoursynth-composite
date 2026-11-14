@@ -10,10 +10,11 @@
 static void fir_row_q15_c(int32_t *out, const int32_t *in,
                           const int32_t *coef, int taps, int w)
 {
+    const int c = taps / 2;
     for (int x = 0; x < w; x++) {
-        int64_t acc = 0;
-        for (int j = 0; j < taps; j++)
-            acc += (int64_t)coef[j] * in[x + j];
+        int64_t acc = (int64_t)coef[c] * in[x + c];
+        for (int j = 0; j < c; j++)
+            acc += (int64_t)coef[j] * (in[x + j] + in[x + taps - 1 - j]);
         out[x] = (int32_t)((acc + 16384) >> 15);
     }
 }

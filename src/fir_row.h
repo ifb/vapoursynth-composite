@@ -20,7 +20,9 @@
  * SIMD tiers write out and read in through COMP_FIR_ROW_ALIGN(w)
  * samples, so out has that capacity and in that plus taps - 1; the
  * padding lanes of out are scratch. Accumulator contract:
- * |acc| < 2^45 for any x in the padded span. */
+ * |acc| < 2^45 for any x in the padded span. The taps must be odd in
+ * number and symmetric (coef[j] == coef[taps - 1 - j]), and |in| < 2^30
+ * so a mirrored pair's sum fits int32: each pair is multiplied once. */
 typedef void (*comp_fir_row_q15_fn)(int32_t *out, const int32_t *in,
                                     const int32_t *coef, int taps, int w);
 

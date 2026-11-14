@@ -49,6 +49,9 @@ void checkasm_test_fir_row(void)
         for (int t = 0; t < NTAPS; t++) {
             for (int i = 0; i < NWIDTHS; i++) {
                 fill_inputs();
+                /* the kernel's contract: symmetric taps */
+                for (int j = 0; j < tapss[t] / 2; j++)
+                    coef_buf[tapss[t] - 1 - j] = coef_buf[j];
                 memset(out_c, 0xaa, sizeof(out_c));
                 memset(out_a, 0x55, sizeof(out_a));
                 checkasm_call_ref(out_c, in_buf, coef_buf, tapss[t], widths[i]);

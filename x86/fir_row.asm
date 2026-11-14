@@ -30,30 +30,15 @@ SECTION .text
     psubd        %1, [d_sub30]
 %endmacro
 
-; void fir_row_q15(int32_t *out, const int32_t *in, const int32_t *coef,
-;                  int taps, int w)
-; per the padding contract, out and in are sized for w rounded up to 16
-; samples, so no lane masking is needed anywhere
-%macro FIR_ROW_Q15 0
-cglobal fir_row_q15, 5, 9, 16, out, in, coef, taps, w, x, pin, pc, j
-%if mmsize == 64
-    mov          xd, 0xAAAA       ; k2 selects the odd dword lanes
-    kmovw        k2, xd
-%endif
-    xor          xq, xq
-.groups:
-    pxor         m0, m0
-    pxor         m1, m1
-%if mmsize < 64
-    pxor         m2, m2
-    pxor         m3, m3
-%endif
-    lea          pinq, [inq + xq*4]
-    mov          pcq, coefq
-    mov          jd, tapsd
-.tap:
+; one coefficient over one or two output groups: %1 = 1 adds the
+; mirrored sample at phi first (a symmetric tap pair), 0 is the center
+%macro FIR_TERM 1 ; pair
     SPLATD       m4, [pcq]
     movu         m5, [pinq]
+%if %1
+    movu         m6, [phiq]
+    paddd        m5, m6
+%endif
     pshufd       m6, m5, 0xF5
     pmuldq       m5, m4
     paddq        m0, m5
@@ -63,16 +48,53 @@ cglobal fir_row_q15, 5, 9, 16, out, in, coef, taps, w, x, pin, pc, j
     ; a second output group amortizes the coefficient broadcast; the
     ; zmm tier is already at the 16-sample padding bound with one
     movu         m7, [pinq + mmsize]
+%if %1
+    movu         m8, [phiq + mmsize]
+    paddd        m7, m8
+%endif
     pshufd       m8, m7, 0xF5
     pmuldq       m7, m4
     paddq        m2, m7
     pmuldq       m8, m4
     paddq        m3, m8
 %endif
+%endmacro
+
+; void fir_row_q15(int32_t *out, const int32_t *in, const int32_t *coef,
+;                  int taps, int w)
+; per the padding contract, out and in are sized for w rounded up to 16
+; samples, so no lane masking is needed anywhere. The taps are odd in
+; number and symmetric, so each pair coef[j] = coef[taps-1-j] multiplies
+; the sum of its two samples once (exact: the pair sums fit int32 and
+; integer accumulation is order-free), then the center tap.
+%macro FIR_ROW_Q15 0
+cglobal fir_row_q15, 5, 10, 16, out, in, coef, taps, w, x, pin, pc, j, phi
+%if mmsize == 64
+    mov          xd, 0xAAAA       ; k2 selects the odd dword lanes
+    kmovw        k2, xd
+%endif
+    movsxd       tapsq, tapsd
+    xor          xq, xq
+.groups:
+    pxor         m0, m0
+    pxor         m1, m1
+%if mmsize < 64
+    pxor         m2, m2
+    pxor         m3, m3
+%endif
+    lea          pinq, [inq + xq*4]
+    lea          phiq, [pinq + tapsq*4 - 4]
+    mov          pcq, coefq
+    mov          jd, tapsd
+    shr          jd, 1
+.tap:
+    FIR_TERM     1
     add          pcq, 4
     add          pinq, 4
+    sub          phiq, 4
     dec          jd
     jg .tap
+    FIR_TERM     0                ; pin, pc now at the center tap
 
     FIR_PACK     m9, m0, m1
     movu         [outq + xq*4], m9

@@ -17,6 +17,7 @@
  * point.
  */
 
+#include <assert.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -98,6 +99,9 @@ static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
     }
     for (int j = 0; j < COMP_EQ_TAPS; j++)
         d->eq_q15[j] = (int32_t)lrint(h[j] * (heq[0] / dc) * 32768.0);
+    /* fir_row_q15 folds mirrored taps */
+    for (int j = 0; j < COMP_EQ_TAPS; j++)
+        assert(d->eq_q15[j] == d->eq_q15[COMP_EQ_TAPS - 1 - j]);
 }
 
 /* the eq=2 blend's sub-nominal low end: ~600 kHz Hann-windowed sinc
@@ -122,6 +126,9 @@ static void design_narrow(comp_decode_t *d, double fs_hz)
         total += d->narrow_q15[j];
     }
     d->narrow_q15[c] += 32768 - total;
+    /* fir_row_q15 folds mirrored taps */
+    for (int j = 0; j < COMP_NARROW_TAPS; j++)
+        assert(d->narrow_q15[j] == d->narrow_q15[COMP_NARROW_TAPS - 1 - j]);
 }
 
 /* stage a row into a zero-winged buffer and run the dispatched FIR;
