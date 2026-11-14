@@ -30,6 +30,8 @@ struct comp_filter_t {
     int mask_kind;       /* COMP_MASK_* : attach that mask as a frame prop
                           * (VS has no 4-plane YUVA; PropToClip pulls it
                           * out). 0 = none. */
+    int pad;             /* decode: replicated columns either side of the
+                          * raster for the resample back; 0 at width=0 */
     comp_encode_t enc;
     comp_decode_t *dec;
 };
@@ -84,6 +86,22 @@ static const VSFrame *VS_CC comp_encode_get_frame(int n, int activation_reason, 
 
 #define COMP_MAX_LOOK COMP_T3D_LOOK
 
+/* Replicate each row's first and last raster samples into the pad
+ * columns either side. The final BT.601 resample reads a few samples
+ * beyond the active raster (the 601 window is wider in time), and zimg
+ * fills out-of-bounds taps by MIRRORING, which reflects interior picture
+ * onto the frame edges; replicated columns make those taps read the
+ * edge value instead. */
+static void comp_fill_pad(uint16_t *p, ptrdiff_t stride, int rw, int pad, int h)
+{
+    for (int r = 0; r < h; r++, p += stride) {
+        for (int k = 0; k < pad; k++) {
+            p[k] = p[pad];
+            p[pad + rw + k] = p[pad + rw - 1];
+        }
+    }
+}
+
 static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, void *instance_data,
                                                   void **frame_data, VSFrameContext *frame_ctx,
                                                   VSCore *core, const VSAPI *vsapi)
@@ -121,6 +139,8 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
     const VSFrame *src = srcs[look];
     const VSFrame *orig = f->orig_node ? vsapi->getFrameFilter(n, f->orig_node, frame_ctx) : NULL;
     VSFrame *dst = vsapi->newVideoFrame(&f->vi.format, f->vi.width, f->vi.height, src, core);
+    const int pad = f->pad;
+    const int rw = f->vi.width - 2 * pad;  /* the raster */
 
     /* mask=: a standalone GRAY16 raster frame holds the requested mask,
      * attached to the picture frame under a private property. VS has no
@@ -146,10 +166,17 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
                       views, view_frames, look,
                       orig ? (const uint16_t *)vsapi->getReadPtr(orig, 0) : NULL,
                       orig ? vsapi->getStride(orig, 0) / 2 : 0,
-                      (uint16_t *)vsapi->getWritePtr(dst, 0), vsapi->getStride(dst, 0) / 2,
-                      (uint16_t *)vsapi->getWritePtr(dst, 1), vsapi->getStride(dst, 1) / 2,
-                      (uint16_t *)vsapi->getWritePtr(dst, 2), vsapi->getStride(dst, 2) / 2,
-                      &m, maskp, mask_stride, f->mask_kind);
+                      (uint16_t *)vsapi->getWritePtr(dst, 0) + pad, vsapi->getStride(dst, 0) / 2,
+                      (uint16_t *)vsapi->getWritePtr(dst, 1) + pad, vsapi->getStride(dst, 1) / 2,
+                      (uint16_t *)vsapi->getWritePtr(dst, 2) + pad, vsapi->getStride(dst, 2) / 2,
+                      &m, maskp ? maskp + pad : NULL, mask_stride, f->mask_kind);
+    if (pad) {
+        for (int p = 0; p < 3; p++)
+            comp_fill_pad((uint16_t *)vsapi->getWritePtr(dst, p),
+                          vsapi->getStride(dst, p) / 2, rw, pad, f->vi.height);
+        if (maskp)
+            comp_fill_pad(maskp, mask_stride, rw, pad, f->vi.height);
+    }
 
     /* each difficulty prop exists only where its path is active (the field
      * stays at the sentinel otherwise). Restore's edge splice drops them,
@@ -215,62 +242,6 @@ static int comp_parse_standard(const VSMap *in, const VSAPI *vsapi, int *standar
     return 0;
 }
 
-/* Horizontally pad a node with COMP_EDGE_PAD replicated edge columns. The
- * final BT.601 resample reads a few samples beyond the active raster (the
- * 601 window is wider in time), and zimg fills out-of-bounds taps by
- * MIRRORING, which reflects interior picture onto the frame edges;
- * replicated padding makes those taps read the edge value instead.
- * consumes the node reference, also on failure */
-static VSNode *comp_pad_h(VSNode *node, VSCore *core, const VSAPI *vsapi)
-{
-    VSPlugin *std = vsapi->getPluginByID("com.vapoursynth.std", core);
-    VSPlugin *rsz = vsapi->getPluginByID("com.vapoursynth.resize", core);
-    const VSVideoInfo *vi = vsapi->getVideoInfo(node);
-    VSNode *cols[3] = { NULL, node, NULL };
-
-    for (int side = 0; side < 2; side++) {
-        VSMap *args = vsapi->createMap();
-        vsapi->mapSetNode(args, "clip", node, maReplace);
-        vsapi->mapSetInt(args, side ? "left" : "right", vi->width - 1, maReplace);
-        VSMap *ret = vsapi->invoke(std, "Crop", args);
-        vsapi->freeMap(args);
-        if (vsapi->mapGetError(ret)) {
-            vsapi->freeMap(ret);
-            vsapi->freeNode(cols[0]);
-            vsapi->freeNode(node);
-            return NULL;
-        }
-        VSNode *col = vsapi->mapGetNode(ret, "clip", 0, NULL);
-        vsapi->freeMap(ret);
-
-        args = vsapi->createMap();
-        vsapi->mapConsumeNode(args, "clip", col, maReplace);
-        vsapi->mapSetInt(args, "width", COMP_EDGE_PAD, maReplace);
-        ret = vsapi->invoke(rsz, "Point", args);
-        vsapi->freeMap(args);
-        if (vsapi->mapGetError(ret)) {
-            vsapi->freeMap(ret);
-            vsapi->freeNode(cols[0]);
-            vsapi->freeNode(node);
-            return NULL;
-        }
-        cols[side ? 2 : 0] = vsapi->mapGetNode(ret, "clip", 0, NULL);
-        vsapi->freeMap(ret);
-    }
-
-    VSMap *args = vsapi->createMap();
-    for (int i = 0; i < 3; i++)
-        vsapi->mapConsumeNode(args, "clips", cols[i], maAppend);
-    VSMap *ret = vsapi->invoke(std, "StackHorizontal", args);
-    vsapi->freeMap(args);
-    if (vsapi->mapGetError(ret)) {
-        vsapi->freeMap(ret);
-        return NULL;
-    }
-    VSNode *padded = vsapi->mapGetNode(ret, "clip", 0, NULL);
-    vsapi->freeMap(ret);
-    return padded;
-}
 
 /* Pull the raster motion mask (a GRAY16 frame the decode node attached
  * under CompositeMask) out as its own clip via std.PropToClip, and
@@ -315,7 +286,7 @@ static VSNode *comp_mask_from_props(VSNode **dec, VSCore *core, const VSAPI *vsa
     return mask;
 }
 
-/* Resample the raster motion mask to the output geometry on the SAME crop
+/* Resample the padded raster mask to the output geometry on the SAME crop
  * as the picture (identical src_left/src_width/width so it stays sample-
  * aligned), but with bilinear — Spline36's lobes ring a 0/1 mask edge.
  * Consumes mask, also on failure. */
@@ -324,11 +295,8 @@ static VSNode *comp_resample_mask(VSNode *mask, VSCore *core, const VSAPI *vsapi
                                   double src_left, double src_width)
 {
     VSPlugin *resize = vsapi->getPluginByID("com.vapoursynth.resize", core);
-    VSNode *padded = comp_pad_h(mask, core, vsapi);
-    if (!padded)
-        return NULL;
     VSMap *args = vsapi->createMap();
-    vsapi->mapConsumeNode(args, "clip", padded, maReplace);
+    vsapi->mapConsumeNode(args, "clip", mask, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", height, maReplace);
     vsapi->mapSetFloat(args, "src_left", src_left, maReplace);
@@ -622,6 +590,12 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
     d.in_frames = d.vi.numFrames;
+    /* the resample back reads past the raster; the decode writes the
+     * replicated columns it needs (width=0 returns the bare raster) */
+    if (width != 0) {
+        d.pad = COMP_EDGE_PAD;
+        d.vi.width += 2 * COMP_EDGE_PAD;
+    }
 
     comp_filter_t *data = malloc(sizeof(*data));
     *data = d;
@@ -660,13 +634,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
      * so the outermost samples come from replicated edge padding. */
     double dst_left, dst_width;
     comp_decode_resample_params(d.standard, width, &dst_left, &dst_width);
-    VSNode *padded = comp_pad_h(dec_node, core, vsapi);
-    if (!padded) {
-        vsapi->mapSetError(out, "Decode: edge padding failed");
-        return;
-    }
     VSMap *args = vsapi->createMap();
-    vsapi->mapConsumeNode(args, "clip", padded, maReplace);
+    vsapi->mapConsumeNode(args, "clip", dec_node, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
     vsapi->mapSetFloat(args, "src_left", dst_left, maReplace);
@@ -961,6 +930,12 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
 
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
     d.in_frames = d.vi.numFrames;
+    /* the resample back reads past the raster; the decode writes the
+     * replicated columns it needs (width=0 returns the bare raster) */
+    if (width != 0) {
+        d.pad = COMP_EDGE_PAD;
+        d.vi.width += 2 * COMP_EDGE_PAD;
+    }
 
     comp_filter_t *data = malloc(sizeof(*data));
     *data = d;
@@ -1005,15 +980,10 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     VSNode *conf_src = vsapi->addNodeRef(dec_node);
 
     /* stage 4: back to the caller's raster */
-    VSNode *padded = comp_pad_h(dec_node, core, vsapi);
-    if (!padded) {
-        vsapi->mapSetError(out, "Restore: edge padding failed");
-        return;
-    }
     double dst_left, dst_width;
     comp_decode_resample_params(d.standard, width, &dst_left, &dst_width);
     args = vsapi->createMap();
-    vsapi->mapConsumeNode(args, "clip", padded, maReplace);
+    vsapi->mapConsumeNode(args, "clip", dec_node, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
     vsapi->mapSetFloat(args, "src_left", dst_left, maReplace);
