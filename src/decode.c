@@ -332,8 +332,8 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
             }
         }
         if (refine > 0) {
-            /* YUV estimate (3 planes), recomposite, crude Y, spare */
-            d->scratch[i].refine = malloc(sizeof(uint16_t) * d->width * d->height * 6);
+            /* Y estimate, recomposite, crude Y, crude chroma */
+            d->scratch[i].refine = malloc(sizeof(uint16_t) * d->width * d->height * 4);
             if (!d->scratch[i].refine) {
                 comp_decode_free(d);
                 return -1;
@@ -1420,26 +1420,25 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
 {
     const int w = d->width;
     const size_t plane = (size_t)w * d->height;
-    uint16_t *est = s->refine;                   /* current YUV estimate */
-    uint16_t *comp2 = s->refine + 3 * plane;     /* recomposite */
-    uint16_t *cru = s->refine + 4 * plane;       /* crude Y of recomposite */
+    /* the loop changes only luma, so the estimate's chroma stays in
+     * the output planes */
+    uint16_t *est = s->refine;                   /* current Y estimate */
+    uint16_t *comp2 = s->refine + plane;         /* recomposite */
+    uint16_t *cru = s->refine + 2 * plane;       /* crude Y of recomposite */
     /* the |difference| sums are integers under rows * w * 65535 < 2^53,
      * so an integer total is the exact value a double running sum takes,
      * and integer accumulation leaves the loops vectorizable */
     int64_t residual_sum = 0;
 
-    for (int r = 0; r < rows; r++) {
+    for (int r = 0; r < rows; r++)
         memcpy(est + r * w, dsty + r * ystride, sizeof(uint16_t) * w);
-        memcpy(est + plane + r * w, dstu + r * ustride, sizeof(uint16_t) * w);
-        memcpy(est + 2 * plane + r * w, dstv + r * vstride, sizeof(uint16_t) * w);
-    }
 
     for (int it = 0; it < d->refine; it++) {
         const int last = it == d->refine - 1;
         residual_sum = 0;
         for (int r = 0; r < rows; r++)
             comp_encode_line(&d->enc, comp2 + r * w,
-                             est + r * w, est + plane + r * w, est + 2 * plane + r * w,
+                             est + r * w, dstu + r * ustride, dstv + r * vstride,
                              comp_sc_line(d->standard, frame, r + row_off));
         crude_decode_frame(d, frame, rows, row_off, 0, comp2, w,
                            cru, w, cru + plane, w, cru + plane, w);
