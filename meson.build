@@ -92,16 +92,24 @@ if get_option('avisynth')
     plugin_incdirs += include_directories('third_party/avisynth')
 endif
 
+# VapourSynth autoloads every module in the root of its plugins dir, but
+# consults a manifest.vs only in a subdirectory, and only plugins listed
+# in a manifest (or given to LoadPlugin) get the per-CPU builds picked
+# for them.
+plugin_install_dir = py.get_install_dir() / 'vapoursynth/plugins/composite'
+
 shared_module('composite',
     plugin_sources,
     dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
     include_directories: plugin_incdirs,
     install: true,
-    install_dir: py.get_install_dir() / 'vapoursynth/plugins',
+    install_dir: plugin_install_dir,
     link_with: core,
     name_prefix: '',
 )
+
+install_data('manifest.vs', install_dir: plugin_install_dir)
 
 test('subcarrier', executable('test_subcarrier',
     files('test/test_subcarrier.c'),

@@ -728,8 +728,8 @@ when the consumer is a comb decoder. Keep it off for cleanup.
 
 ## Installing
 
-**VapourSynth:** drop `composite.so`/`composite.dll` in your plugins
-autoload dir (or `core.std.LoadPlugin(...)`).
+**VapourSynth** (R75 or later): drop `composite.so`/`composite.dll` in
+your plugins autoload dir (or `core.std.LoadPlugin(...)`).
 
 **AviSynth+:** load the same module. The AviSynth frontend registers
 `composite_Encode`, `composite_Decode`, `composite_Restore`, and needs
