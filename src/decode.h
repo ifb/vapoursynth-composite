@@ -15,21 +15,33 @@
 #define COMP_EQ_TAPS 31
 #define COMP_NARROW_TAPS 13
 
-/* Filter the PAL quadrature product rows and rotate onto the U/V axes
- * (the hot loop of the PALcolour-style demodulator). m and n hold four
- * planes of `stride` int32 elements each — the vertical-tap groups of
- * the chroma-times-carrier products — with x = 0 at element
- * COMP_DECODE_FILTER_SIZE and that many zeros of padding on each side.
- * cf is the 2D chroma filter, (FILTER_SIZE+1) x 4 Q16 values. bp/bq is
- * the line's burst-phase unit vector (Q15), vswitch the PAL switch
- * sign. Writes w samples of U and V; w must be a multiple of 8. */
-typedef void (*comp_pal_demod_fn)(int32_t *u, int32_t *v,
-                                  const int32_t *m, const int32_t *n,
-                                  ptrdiff_t stride, const int32_t *cf,
+/* Filter the PAL chroma lines with the 2D chroma filter, demodulate
+ * them against the 4xfsc carriers and rotate onto the U/V axes (the hot
+ * loop of the PALcolour-style demodulator). pr holds four planes of
+ * `stride` int16 word pairs, the vertical tap groups (line, 0),
+ * (-2, +2), (-1, +1) and (-3, +3) field lines, with x = 0 at pair
+ * COMP_DECODE_FILTER_SIZE and that many zero pairs each side. The
+ * chroma-times-carrier products are zero on alternate samples, so each
+ * tap feeds the sine or the cosine sums by the parity of its position,
+ * and the carrier and vertical signs fold into per-phase coefficient
+ * rows (comp_pal_demod_init). The Q16 filter over int16 lines keeps
+ * every sum near 2^30, so int32 is exact and all tiers byte-identical.
+ * bp/bq is the line's burst-phase unit vector (Q15), vswitch the PAL
+ * switch sign. Writes u, v through COMP_PAL_DEMOD_ALIGN(w) and reads
+ * pr through that plus 2 * COMP_DECODE_FILTER_SIZE pairs. */
+#define COMP_PAL_DEMOD_ROWS (4 + 8 * COMP_DECODE_FILTER_SIZE)
+#define COMP_PAL_DEMOD_ALIGN(w) (((w) + 15) & ~15)
+
+typedef void (*comp_pal_demod_fn)(int32_t *u, int32_t *v, const int16_t *pr,
+                                  ptrdiff_t stride, const int16_t (*coef)[32],
                                   int w, int32_t bp, int32_t bq,
                                   int32_t vswitch);
 
 comp_pal_demod_fn comp_get_pal_demod_fn(unsigned cpu);
+
+/* the coefficient rows from the Q16 2D chroma filter cfilt[b][k] */
+void comp_pal_demod_init(int16_t coef[COMP_PAL_DEMOD_ROWS][32],
+                         const int32_t cfilt[COMP_DECODE_FILTER_SIZE + 1][4]);
 
 /* One comb candidate of the NTSC 3D split, prepared per row: the
  * bounds and phase tests of the reference's per-pixel candidate table
@@ -220,7 +232,7 @@ struct comp_decode_t {
     int32_t eq_q15[COMP_EQ_TAPS];
     int32_t narrow_q15[COMP_NARROW_TAPS];  /* eq=2: sub-nominal chroma LP */
     int16_t sin_q15[COMP_SC_DEN_PAL];
-    int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
+    int16_t pal_demod_coef[COMP_PAL_DEMOD_ROWS][32];
     comp_pal_demod_fn pal_demod;
     comp_fir_row_q15_fn fir_row;
     comp_split3d_row_fn split3d_row;

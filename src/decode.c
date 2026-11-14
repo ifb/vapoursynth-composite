@@ -228,9 +228,11 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
 
             cdiv += 2 * (cfilt[f][0] + 2 * cfilt[f][2] + 2 * cfilt[f][1] + 2 * cfilt[f][3]);
         }
+        int32_t cfilt_q16[FS + 1][4];
         for (int f = 0; f <= FS; f++)
             for (int k = 0; k < 4; k++)
-                d->cfilt_q16[f][k] = (int32_t)lrint(cfilt[f][k] / cdiv * 65536.0);
+                cfilt_q16[f][k] = (int32_t)lrint(cfilt[f][k] / cdiv * 65536.0);
+        comp_pal_demod_init(d->pal_demod_coef, (const int32_t (*)[4])cfilt_q16);
 
         if (eq) {
             /* the filter's horizontal profile: for vertically flat
@@ -497,62 +499,93 @@ static inline uint16_t clamp_u16(int32_t v)
     return (uint16_t)(v < 0 ? 0 : v > 65535 ? 65535 : v);
 }
 
+/* coefficient row of tap b, side (0: x + b, 1: x - b) and plane k;
+ * b = 0 has one position */
+#define PAL_ROW(b, side, k) ((b) ? 4 + ((b) - 1) * 8 + (side) * 4 + (k) : (k))
+
+void comp_pal_demod_init(int16_t coef[COMP_PAL_DEMOD_ROWS][32],
+                         const int32_t cfilt[COMP_DECODE_FILTER_SIZE + 1][4])
+{
+    static const int sign[4] = { 1, 1, -1, -1 };  /* sn + cs */
+    /* each plane's lines as the reference combines them: line,
+     * -(-2 + +2), -1 - +1, -(-3) + +3 */
+    static const int vlo[4] = { 1, -1, 1, -1 };
+    static const int vhi[4] = { 0, -1, -1, 1 };
+    for (int b = 0; b <= FS; b++) {
+        for (int side = 0; side < (b ? 2 : 1); side++) {
+            for (int k = 0; k < 4; k++) {
+                /* at b = 0 the mirrored pair m[x+b] + m[x-b] is 2 m[x] */
+                const int32_t c = cfilt[b][k] * (b ? 1 : 2);
+                int16_t *row = coef[PAL_ROW(b, side, k)];
+                for (int l = 0; l < 16; l++) {
+                    const int s = sign[(l + (side ? 4 * FS - b : b)) & 3];
+                    row[2 * l] = (int16_t)(c * s * vlo[k]);
+                    row[2 * l + 1] = (int16_t)(c * s * vhi[k]);
+                }
+            }
+        }
+    }
+}
+
 /* Demodulate one PAL field. comp and chroma are field views; the output
  * pointers are frame planes, written at rows 2*fieldline + field.
  * conf (a field view at chroma_stride, may be NULL) is the transform's
  * chroma-confidence map, which scales the eq=2 boost per sample. */
 /* C reference for the dispatched demod kernel; see decode.h */
-static void pal_demod_row_c(int32_t *u, int32_t *v,
-                            const int32_t *m, const int32_t *n,
-                            ptrdiff_t stride, const int32_t *cf,
+static void pal_demod_row_c(int32_t *u, int32_t *v, const int16_t *pr,
+                            ptrdiff_t stride, const int16_t (*coef)[32],
                             int w, int32_t bp, int32_t bq, int32_t vswitch)
 {
-    for (int x = 0; x < w; x++) {
-        int64_t pu = 0, qu = 0, pv = 0, qv = 0;
+    enum { CHUNK = 128 };
+
+    for (int x0 = 0; x0 < w; x0 += CHUNK) {
+        const int n = w - x0 < CHUNK ? w - x0 : CHUNK;
+        /* [c0/c1 or c2/c3 planes][tap parity][x]; rows outer and x
+         * inner in steps of the four carrier phases keep each row's
+         * coefficients invariant across the inner loop */
+        int32_t acc[2][2][CHUNK];
+        memset(acc, 0, sizeof(acc));
 
         for (int b = 0; b <= FS; b++) {
-            const int l = FS + x - b;
-            const int r = FS + x + b;
-            const int32_t *c = cf + 4 * b;
-
-            const int32_t m0 = m[r] + m[l];
-            const int32_t n0 = n[r] + n[l];
-            const int32_t m1 = m[1 * stride + r] + m[1 * stride + l];
-            const int32_t n1 = n[1 * stride + r] + n[1 * stride + l];
-            const int32_t m2 = m[2 * stride + r] + m[2 * stride + l];
-            const int32_t n2 = n[2 * stride + r] + n[2 * stride + l];
-            const int32_t m3 = m[3 * stride + r] + m[3 * stride + l];
-            const int32_t n3 = n[3 * stride + r] + n[3 * stride + l];
-
-            pu += (int64_t)m0 * c[0] + (int64_t)m1 * c[1]
-                + (int64_t)n2 * c[2] + (int64_t)n3 * c[3];
-            qu += (int64_t)n0 * c[0] + (int64_t)n1 * c[1]
-                - (int64_t)m2 * c[2] - (int64_t)m3 * c[3];
-            pv += (int64_t)m0 * c[0] + (int64_t)m1 * c[1]
-                - (int64_t)n2 * c[2] - (int64_t)n3 * c[3];
-            qv += (int64_t)n0 * c[0] + (int64_t)n1 * c[1]
-                + (int64_t)m2 * c[2] + (int64_t)m3 * c[3];
+            for (int side = 0; side < (b ? 2 : 1); side++) {
+                for (int k = 0; k < 4; k++) {
+                    const int16_t *c = coef[PAL_ROW(b, side, k)];
+                    const int16_t *pk = pr + 2 * (k * stride + FS + x0 + (side ? -b : b));
+                    int32_t *a = acc[k >= 2][b & 1];
+                    for (int x = 0; x < n; x += 4)
+                        for (int l = 0; l < 4; l++)
+                            a[x + l] += c[2 * l] * pk[2 * (x + l)]
+                                      + c[2 * l + 1] * pk[2 * (x + l) + 1];
+                }
+            }
         }
 
-        /* Q16 filter -> Q0 products (at half chroma amplitude) */
-        const int32_t pu0 = (int32_t)((pu + 32768) >> 16);
-        const int32_t qu0 = (int32_t)((qu + 32768) >> 16);
-        const int32_t pv0 = (int32_t)((pv + 32768) >> 16);
-        const int32_t qv0 = (int32_t)((qv + 32768) >> 16);
+        for (int x = 0; x < n; x++) {
+            /* a tap lands on a sine sample when x + b is odd */
+            const int sn = !(x & 1);
+            const int32_t a_sn = acc[0][sn][x], a_cs = acc[0][!sn][x];
+            const int32_t b_sn = acc[1][sn][x], b_cs = acc[1][!sn][x];
 
-        /* rotate onto the U/V axes and double (the filter recovers
-         * chroma at half amplitude); bp/bq are Q15, so >> 14 */
-        u[x] = (int32_t)(-((int64_t)pu0 * bp + (int64_t)qu0 * bq + 8192) >> 14);
-        v[x] = vswitch *
-            (int32_t)(-((int64_t)qv0 * bp - (int64_t)pv0 * bq + 8192) >> 14);
+            /* Q16 filter -> Q0 products (at half chroma amplitude) */
+            const int32_t pu0 = (a_sn + b_cs + 32768) >> 16;
+            const int32_t qu0 = (a_cs - b_sn + 32768) >> 16;
+            const int32_t pv0 = (a_sn - b_cs + 32768) >> 16;
+            const int32_t qv0 = (a_cs + b_sn + 32768) >> 16;
+
+            /* rotate onto the U/V axes and double (the filter recovers
+             * chroma at half amplitude); bp/bq are Q15, so >> 14 */
+            u[x0 + x] = (int32_t)(-((int64_t)pu0 * bp + (int64_t)qu0 * bq + 8192) >> 14);
+            v[x0 + x] = vswitch *
+                (int32_t)(-((int64_t)qv0 * bp - (int64_t)pv0 * bq + 8192) >> 14);
+        }
     }
 }
 
 #if defined(__x86_64__)
 #define PAL_DEMOD_ROW_ASM(isa)                                              \
     void comp_pal_demod_row_##isa(int32_t *u, int32_t *v,                   \
-                                  const int32_t *m, const int32_t *n,       \
-                                  ptrdiff_t stride, const int32_t *cf,      \
+                                  const int16_t *pr, ptrdiff_t stride,      \
+                                  const int16_t (*coef)[32],                \
                                   int w, int32_t bp, int32_t bq,            \
                                   int32_t vswitch)
 PAL_DEMOD_ROW_ASM(sse4);
@@ -585,13 +618,14 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
     const int w = d->width;
     const int rows = d->height / 2;
 
-    /* products of chroma and the quadrature reference carriers, which at
-     * 4xfsc are {0,1,0,-1} and {1,0,-1,0}: no multiplies. Padded by FS
-     * zeros each side so the filter loop needs no bounds checks.
-     * Vertical taps: [0] = line, [2] = ±1 line, [1] = ±2, [3] = ±3, with
-     * the sign pattern of the reference implementation. */
-    int32_t m[4][WIDTH + 2 * FS], n[4][WIDTH + 2 * FS];
+    /* the vertical tap groups as word pairs of the chroma lines:
+     * (line, 0), (-2, +2), (-1, +1), (-3, +3) field lines. FS zero
+     * pairs each side give the filter its reach without bounds checks;
+     * only [FS, FS + w) is rewritten per row. */
+    enum { PR_STRIDE = COMP_PAL_DEMOD_ALIGN(WIDTH) + 2 * FS };
+    int16_t pr[4][2 * PR_STRIDE];
 
+    memset(pr, 0, sizeof(pr));
     for (int fr = 0; fr < rows; fr++) {
         const int16_t *in0 = chroma + fr * chroma_stride;
         const int16_t *in1 = fr - 1 >= 0   ? chroma + (fr - 1) * chroma_stride : zero_line;
@@ -601,24 +635,15 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         const int16_t *in5 = fr - 3 >= 0   ? chroma + (fr - 3) * chroma_stride : zero_line;
         const int16_t *in6 = fr + 3 < rows ? chroma + (fr + 3) * chroma_stride : zero_line;
 
-        for (int k = 0; k < 4; k++) {
-            memset(&m[k][0], 0, sizeof(int32_t) * FS);
-            memset(&m[k][FS + w], 0, sizeof(int32_t) * FS);
-            memset(&n[k][0], 0, sizeof(int32_t) * FS);
-            memset(&n[k][FS + w], 0, sizeof(int32_t) * FS);
-        }
         for (int x = 0; x < w; x++) {
-            const int32_t sn = (x & 3) == 1 ? 1 : (x & 3) == 3 ? -1 : 0;
-            const int32_t cs = (x & 3) == 0 ? 1 : (x & 3) == 2 ? -1 : 0;
-            const int i = FS + x;
-            m[0][i] = in0[x] * sn;
-            m[2][i] = in1[x] * sn - in2[x] * sn;
-            m[1][i] = -in3[x] * sn - in4[x] * sn;
-            m[3][i] = -in5[x] * sn + in6[x] * sn;
-            n[0][i] = in0[x] * cs;
-            n[2][i] = in1[x] * cs - in2[x] * cs;
-            n[1][i] = -in3[x] * cs - in4[x] * cs;
-            n[3][i] = -in5[x] * cs + in6[x] * cs;
+            const int i = 2 * (FS + x);
+            pr[0][i] = in0[x];
+            pr[1][i] = in3[x];
+            pr[1][i + 1] = in4[x];
+            pr[2][i] = in1[x];
+            pr[2][i + 1] = in2[x];
+            pr[3][i] = in5[x];
+            pr[3][i + 1] = in6[x];
         }
 
         /* line phase: (bp,bq) is the unit vector the reference derives
@@ -632,10 +657,11 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         uint16_t *outy = dsty + row * ystride;
         uint16_t *outu = dstu + row * ustride;
         uint16_t *outv = dstv + row * vstride;
-        int32_t u_row[WIDTH], v_row[WIDTH], u_eq[WIDTH], v_eq[WIDTH];
+        int32_t u_row[COMP_PAL_DEMOD_ALIGN(WIDTH)], v_row[COMP_PAL_DEMOD_ALIGN(WIDTH)];
+        int32_t u_eq[WIDTH], v_eq[WIDTH];
 
-        d->pal_demod(u_row, v_row, &m[0][0], &n[0][0], WIDTH + 2 * FS,
-                     &d->cfilt_q16[0][0], w, bp, bq, sc.vswitch);
+        d->pal_demod(u_row, v_row, &pr[0][0], PR_STRIDE, d->pal_demod_coef,
+                     w, bp, bq, sc.vswitch);
 
         /* luma is the composite minus the separated chroma */
         int32_t yl_row[WIDTH];

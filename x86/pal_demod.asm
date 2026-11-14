@@ -7,12 +7,8 @@
 
 SECTION_RODATA 64
 
-; arithmetic-shift emulation biases: X + bias is non-negative for the
-; accumulator magnitudes the C reference admits, so a logical shift of
-; the biased value equals the arithmetic shift plus a constant that the
-; final pack subtracts (or folds into the negation)
-q_bias16:  times 8 dq (1 << 38) + 32768
-d_sub22:   times 16 dd 1 << 22
+d_rnd16:   times 16 dd 32768
+; ROTATE's shift-emulation biases (see util.asm)
 q_nbias14: times 8 dq (1 << 40) - 8192
 d_sub26:   times 16 dd 1 << 26
 
@@ -20,161 +16,115 @@ SECTION .text
 
 %define FS 7
 
-; one filter term: acc_e/acc_o += ((base[l] + base[r]) * coef) as
-; even/odd 64-bit lane products of the dword sums
-%macro TERM 6 ; acc_e, acc_o, base, coef, disp_l, disp_r
-%if mmsize == 64
-    ; masked so the ragged final iteration (w % 16 == 8) does not
-    ; read past the last plane row
-    vmovdqu32    m12{k1}{z}, [%3 + xq*4 + %5]
-    vpaddd       m12{k1}{z}, m12, [%3 + xq*4 + %6]
-%elif cpuflag(avx)
-    movu         m12, [%3 + xq*4 + %5]
-    paddd        m12, [%3 + xq*4 + %6]
+; one pair plane at one tap position: the word pairs at x + disp dot the
+; row's per-phase (lo, hi) coefficients into the dword sums of acc
+%macro TERM 4 ; acc, plane, byte disp, coefficient row
+    movu         m4, [%2 + xq*4 + %3]
+%if cpuflag(avx)
+    pmaddwd      m4, [cfq + (%4)*64]
 %else
-    movu         m12, [%3 + xq*4 + %5]
-    movu         m13, [%3 + xq*4 + %6]
-    paddd        m12, m13
+    ; legacy-SSE memory operands fault unless 16-byte aligned, and the
+    ; table lives in a malloc'd decoder at no particular offset
+    movu         m5, [cfq + (%4)*64]
+    pmaddwd      m4, m5
 %endif
-    pshufd       m13, m12, 0xF5
-    pmuldq       m12, %4
-    paddq        %1, m12
-    pmuldq       m13, %4
-    paddq        %2, m13
+    paddd        %1, m4
 %endmacro
 
-; all eight coefficient terms of one tap b for outputs x..x+mmsize/4-1:
-; A += m0*cf0 + m1*cf1   B += n2*cf2 + n3*cf3
-; C += n0*cf0 + n1*cf1   D += m2*cf2 + m3*cf3
-%macro TAP 1 ; b
-%if cpuflag(avx2)
-    vpbroadcastd m8,  [cfq + %1*16 + 0]
-    vpbroadcastd m9,  [cfq + %1*16 + 4]
-    vpbroadcastd m10, [cfq + %1*16 + 8]
-    vpbroadcastd m11, [cfq + %1*16 + 12]
-%else
-    movu         m8,  [cfq + %1*16]
-    pshufd       m9,  m8, 0x55
-    pshufd       m10, m8, 0xAA
-    pshufd       m11, m8, 0xFF
-    pshufd       m8,  m8, 0x00
-%endif
-    TERM m0, m1, mq,   m8,  (FS-%1)*4, (FS+%1)*4
-    TERM m4, m5, nq,   m8,  (FS-%1)*4, (FS+%1)*4
-    TERM m0, m1, mr1q, m9,  (FS-%1)*4, (FS+%1)*4
-    TERM m4, m5, nr1q, m9,  (FS-%1)*4, (FS+%1)*4
-    TERM m6, m7, mr2q, m10, (FS-%1)*4, (FS+%1)*4
-    TERM m2, m3, nr2q, m10, (FS-%1)*4, (FS+%1)*4
-    TERM m6, m7, mr3q, m11, (FS-%1)*4, (FS+%1)*4
-    TERM m2, m3, nr3q, m11, (FS-%1)*4, (FS+%1)*4
+; all four planes at tap position FS + %1 (coefficient rows from %2)
+; into the c0/c1 sums %3 and the c2/c3 sums %4
+%macro PLANES 4 ; offset, first row, acc c0/c1, acc c2/c3
+    TERM         %3, prq, (FS + %1)*4, %2
+    TERM         %3, p1q, (FS + %1)*4, %2 + 1
+    TERM         %4, p2q, (FS + %1)*4, %2 + 2
+    TERM         %4, p3q, (FS + %1)*4, %2 + 3
 %endmacro
 
-; (e, o) 64-bit lanes -> packed int32 of (val + 32768) >> 16
-%macro ROUND16 3 ; out, e, o (clobbers e, o)
-    paddq        %2, [q_bias16]
-    paddq        %3, [q_bias16]
-    psrlq        %2, 16
-    psrlq        %3, 16
-    psllq        %3, 32
-    BLEND_ODD    %1, %2, %3
-    psubd        %1, [d_sub22]
-%endmacro
-
-; void pal_demod_row(int32_t *u, int32_t *v, const int32_t *m,
-;                    const int32_t *n, ptrdiff_t stride,
-;                    const int32_t *cf, int w, int32_t bp, int32_t bq,
-;                    int32_t vswitch)
+; void pal_demod_row(int32_t *u, int32_t *v, const int16_t *pr,
+;                    ptrdiff_t stride, const int16_t (*coef)[32], int w,
+;                    int32_t bp, int32_t bq, int32_t vswitch)
+;
+; Sums by coefficient group and tap parity: m0/m1 the c0/c1 planes at
+; even/odd b, m2/m3 the c2/c3 planes. A tap lands on a sine sample when
+; x + b is odd, so even lanes take their sine sums from the odd-b
+; accumulators and odd lanes from the even-b ones.
 %macro PAL_DEMOD_ROW 0
-cglobal pal_demod_row, 6, 14, 16, u, v, m, n, stride, cf, \
-                                  mr1, mr2, mr3, nr1, nr2, nr3, x, w
-    lea          xq, [strideq*4]
-    lea          mr1q, [mq + xq]
-    lea          mr2q, [mq + xq*2]
-    lea          mr3q, [mr1q + xq*2]
-    lea          nr1q, [nq + xq]
-    lea          nr2q, [nq + xq*2]
-    lea          nr3q, [nr1q + xq*2]
-    mov          wd, dword r6m
+cglobal pal_demod_row, 6, 11, 16, u, v, pr, stride, cf, w, p1, p2, p3, x, t
+    lea          tq, [strideq*4]
+    lea          p1q, [prq + tq]
+    lea          p2q, [prq + tq*2]
+    lea          p3q, [p1q + tq*2]
 %if mmsize == 64
-    mov          strided, 0xAAAA  ; k2 selects the odd dword lanes
-    kmovw        k2, strided
-    kxnorw       k1, k1, k1
+    mov          td, 0xAAAA               ; k2 selects odd dword lanes (BLEND_ODD)
+    kmovw        k2, td
     ; vswitch is a uniform +/-1; k3 = all-ones when it is -1, so a
     ; merge-masked 0 - v negates exactly those lanes (there is no EVEX
     ; psignd, and this beats pmulld: 1 uop vs 2 on Intel, 1 on Zen)
-    xor          strided, strided
-    cmp          dword r9m, 0
-    setl         strideb
-    neg          strided
-    kmovw        k3, strided
+    xor          td, td
+    cmp          dword r8m, 0
+    setl         tb
+    neg          td
+    kmovw        k3, td
 %endif
     xor          xq, xq
 .loop:
-%if mmsize == 64
-    ; w is only a multiple of 8, so the final iteration may cover
-    ; just 8 outputs; narrow k1 for its loads and stores
-    mov          strided, wd
-    sub          strided, xd
-    cmp          strided, 16
-    jge          .full
-    mov          strided, 0xFF
-    kmovw        k1, strided
-.full:
-%endif
-    pxor         m0, m0    ; A even
-    pxor         m1, m1    ; A odd
-    pxor         m2, m2    ; B even
-    pxor         m3, m3    ; B odd
-    pxor         m4, m4    ; C even
-    pxor         m5, m5    ; C odd
-    pxor         m6, m6    ; D even
-    pxor         m7, m7    ; D odd
-
+    pxor         m0, m0
+    pxor         m1, m1
+    pxor         m2, m2
+    pxor         m3, m3
+    ; b = 0 reads one position (the coefficients carry the doubling)
+    PLANES       0, 0, m0, m2
     ; %%-local so the tap counter cannot leak into the next cglobal's
-    ; DEFINE_ARGS cleanup (a bare `b' would expand there and undef m8)
-%assign %%b 0
-%rep FS + 1
-    TAP %%b
+    ; DEFINE_ARGS cleanup
+%assign %%b 1
+%rep FS
+%if %%b & 1
+    PLANES        %%b, 4 + (%%b - 1)*8,     m1, m3
+    PLANES       -%%b, 4 + (%%b - 1)*8 + 4, m1, m3
+%else
+    PLANES        %%b, 4 + (%%b - 1)*8,     m0, m2
+    PLANES       -%%b, 4 + (%%b - 1)*8 + 4, m0, m2
+%endif
 %assign %%b %%b+1
 %endrep
 
-    ; pu = A + B, pv = A - B, qu = C - D, qv = C + D
-    paddq        m12, m0, m2
-    paddq        m13, m1, m3
-    psubq        m0, m2
-    psubq        m1, m3
-    psubq        m14, m4, m6
-    psubq        m15, m5, m7
-    paddq        m4, m6
-    paddq        m5, m7
+    BLEND_ODD    m4, m1, m0               ; c0/c1 on sine samples
+    BLEND_ODD    m5, m0, m1               ; c0/c1 on cosine samples
+    BLEND_ODD    m6, m3, m2               ; c2/c3 on sine samples
+    BLEND_ODD    m7, m2, m3               ; c2/c3 on cosine samples
+    ; pu = A_sn + B_cs, pv = A_sn - B_cs, qu = A_cs - B_sn,
+    ; qv = A_cs + B_sn; then the Q16 rounding to Q0
+    paddd        m0, m4, m7
+    psubd        m1, m4, m7
+    psubd        m2, m5, m6
+    paddd        m3, m5, m6
+    mova         m4, [d_rnd16]
+    paddd        m0, m4
+    paddd        m1, m4
+    paddd        m2, m4
+    paddd        m3, m4
+    psrad        m0, 16                   ; pu0
+    psrad        m1, 16                   ; pv0
+    psrad        m2, 16                   ; qu0
+    psrad        m3, 16                   ; qv0
 
-    ROUND16      m2, m12, m13     ; pu0
-    ROUND16      m3, m14, m15     ; qu0
-    ROUND16      m6, m0, m1       ; pv0
-    ROUND16      m7, m4, m5       ; qv0
-
-    SPLATD       m8, dword r7m    ; bp
-    SPLATD       m9, dword r8m    ; bq
+    SPLATD       m8, dword r6m            ; bp
+    SPLATD       m9, dword r7m            ; bq
 
     ; u = -(pu0*bp + qu0*bq + 8192) >> 14
-    ROTATE       m10, m2, m8, m3, m9, paddq
-%if mmsize == 64
-    vmovdqu32    [uq + xq*4]{k1}, m10
-%else
+    ROTATE       m10, m0, m8, m2, m9, paddq
     movu         [uq + xq*4], m10
-%endif
 
     ; v = vswitch * (-(qv0*bp - pv0*bq + 8192) >> 14)
-    ROTATE       m10, m7, m8, m6, m9, psubq
+    ROTATE       m10, m3, m8, m1, m9, psubq
 %if mmsize == 64
     vpxord       m11, m11, m11
-    vpsubd       m10{k3}, m11, m10   ; conditional negate by vswitch (k3)
-    vmovdqu32    [vq + xq*4]{k1}, m10
+    vpsubd       m10{k3}, m11, m10        ; conditional negate by vswitch (k3)
 %else
-    SPLATD       m11, dword r9m   ; vswitch
+    SPLATD       m11, dword r8m           ; vswitch
     psignd       m10, m11
-    movu         [vq + xq*4], m10
 %endif
+    movu         [vq + xq*4], m10
 
     add          xq, mmsize/4
     cmp          xd, wd
