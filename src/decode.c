@@ -1454,7 +1454,9 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
     uint16_t *cru = s->refine + 2 * plane;       /* crude Y of recomposite */
     /* the |difference| sums are integers under rows * w * 65535 < 2^53,
      * so an integer total is the exact value a double running sum takes,
-     * and integer accumulation leaves the loops vectorizable */
+     * and integer accumulation leaves the loops vectorizable. Each row's
+     * part (w * 65535 < 2^32) is summed in 32 bits: gcc vectorizes
+     * neither loop with the widening into the 64-bit total inside it. */
     int64_t residual_sum = 0;
 
     for (int r = 0; r < rows; r++)
@@ -1473,12 +1475,14 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
             const uint16_t *oy = orig_y + r * orig_stride;
             uint16_t *ey = est + r * w;
             const uint16_t *cy = cru + r * w;
+            uint32_t row_sum = 0;
             for (int x = 0; x < w; x++) {
                 const int32_t resid = (int32_t)oy[x] - (int32_t)cy[x];
-                if (last)               /* model misfit remaining this frame */
-                    residual_sum += resid < 0 ? -resid : resid;
+                row_sum += (uint32_t)(resid < 0 ? -resid : resid);
                 ey[x] = clamp_u16((int32_t)ey[x] + resid);
             }
+            if (last)                   /* model misfit remaining this frame */
+                residual_sum += row_sum;
         }
     }
 
@@ -1488,10 +1492,12 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
     for (int r = 0; r < rows; r++) {
         const uint16_t *in = dsty + r * ystride;
         const uint16_t *ey = est + r * w;
+        uint32_t row_sum = 0;
         for (int x = 0; x < w; x++) {
             const int32_t dlt = (int32_t)ey[x] - (int32_t)in[x];
-            correction_sum += dlt < 0 ? -dlt : dlt;
+            row_sum += (uint32_t)(dlt < 0 ? -dlt : dlt);
         }
+        correction_sum += row_sum;
     }
 
     for (int r = 0; r < rows; r++)
