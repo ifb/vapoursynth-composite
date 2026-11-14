@@ -496,11 +496,6 @@ static void cti_row(const uint16_t *outy, int32_t *u, int32_t *v, int w)
     }
 }
 
-static inline int32_t rdiv(int64_t num, int32_t den)
-{
-    return (int32_t)((num >= 0 ? num + den / 2 : num - den / 2) / den);
-}
-
 static inline uint16_t clamp_u16(int32_t v)
 {
     return (uint16_t)(v < 0 ? 0 : v > 65535 ? 65535 : v);
@@ -1228,17 +1223,16 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
         d->fir_row(p_row, m, colorlp_q15d, COLORLP_TAPS, w);
         d->fir_row(q_row, n, colorlp_q15d, COLORLP_TAPS, w);
 
+        int32_t yl_row[COMP_ACTIVE_WIDTH_PAL];
         for (int x = 0; x < w; x++) {
             const int32_t p0 = p_row[x];
             const int32_t q0 = q_row[x];
             u_row[x] = (int32_t)(((int64_t)p0 * cs0 + (int64_t)q0 * sn0 + 8192) >> 14);
             v_row[x] = sc.vswitch *
                 (int32_t)(((int64_t)q0 * cs0 - (int64_t)p0 * sn0 + 8192) >> 14);
-
-            const int32_t yl = (int32_t)line[x] - est[x];
-            dsty[r * ystride + x] =
-                clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
+            yl_row[x] = (int32_t)line[x] - est[x] - d->level_black;
         }
+        d->demod_quant_row(dsty + r * ystride, yl_row, &d->mag_y, w);
 
         const int32_t *u_out = u_row, *v_out = v_row;
         if (use_eq && d->eq) {
@@ -1247,10 +1241,8 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
             u_out = u_eq;
             v_out = v_eq;
         }
-        for (int x = 0; x < w; x++) {
-            dstu[r * ustride + x] = clamp_u16(32768 + rdiv((int64_t)u_out[x] * 32768, d->ku));
-            dstv[r * vstride + x] = clamp_u16(32768 + rdiv((int64_t)v_out[x] * 32768, d->kv));
-        }
+        d->demod_quant_row(dstu + r * ustride, u_out, &d->mag_u, w);
+        d->demod_quant_row(dstv + r * vstride, v_out, &d->mag_v, w);
     }
 }
 
