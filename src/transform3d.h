@@ -143,13 +143,13 @@ void comp_transform3d_free(comp_transform3d_t *t);
  * threshold and luma-evidence test) */
 void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v);
 
-/* Slab cache. A slab holds the accumulated chroma (and confidence)
- * contribution of every tile at one temporal grid position tz to the
- * ZTILE fields those tiles span; the tile grid is anchored at absolute
- * field 0, so a slab's content depends only on (tz, parity) and each
- * slab serves the four output frames whose tiles it provides. Slabs
- * are built once under the cache and reused, cutting the FFT and bin
- * filter work by up to 4x. */
+/* Slab cache. A slab holds the accumulated chroma contribution of
+ * every tile at one temporal grid position tz to the ZTILE fields those
+ * tiles span, and each tile's confidence; the tile grid is anchored at
+ * absolute field 0, so a slab's content depends only on (tz, parity)
+ * and each slab serves the four output frames whose tiles it provides.
+ * Slabs are built once under the cache and reused, cutting the FFT and
+ * bin filter work by up to 4x. */
 typedef struct {
     int tz;          /* absolute field index of the slab origin */
     int parity;
@@ -157,7 +157,8 @@ typedef struct {
     int refs;        /* readers + builder; protects against eviction */
     uint64_t stamp;  /* LRU */
     float *chroma;   /* [ZTILE][field_rows][width] */
-    float *conf;     /* likewise; NULL when confidence is not tracked */
+    float *tile_w;   /* per-tile confidence, [tile row][tile column];
+                      * NULL when confidence is not tracked */
 } comp_t3d_slab_t;
 
 typedef struct {

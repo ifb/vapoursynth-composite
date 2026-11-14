@@ -718,6 +718,23 @@ static float apply_filter_ntsc(const comp_transform3d_t *t,
     return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
 
+/* Tile grid sizes. A tile column steps XTILE/2 from -XTILE/2 while it
+ * starts inside the width; a PAL tile row steps YTILE_PAL/2 field rows
+ * from -YTILE_PAL/2 up to field_rows + SHIFT_MAX, an NTSC one YTILE/2
+ * frame lines from -YTILE/2 up to 2 * field_rows. */
+static int tile_cols(int width)
+{
+    return (width + XTILE / 2 + XTILE / 2 - 1) / (XTILE / 2);
+}
+
+static int tile_rows_max(int field_rows)
+{
+    const int pal = (field_rows + SHIFT_MAX + YTILE_PAL / 2 + YTILE_PAL / 2 - 1)
+                    / (YTILE_PAL / 2);
+    const int ntsc = (2 * field_rows + YTILE / 2 + YTILE / 2 - 1) / (YTILE / 2);
+    return pal > ntsc ? pal : ntsc;
+}
+
 /* the slab origin never takes this value: the grid is anchored at
  * absolute field 0 and the first frame's low slab sits at -ZTILE/2 */
 #define SLAB_EMPTY INT_MIN
@@ -741,12 +758,14 @@ int comp_t3d_cache_init(comp_t3d_cache_t *c, int nslabs, int width,
     c->field_rows = field_rows;
 
     const size_t planes = sizeof(float) * ZTILE * field_rows * width;
+    const size_t grid = sizeof(float) * tile_rows_max(field_rows)
+                        * tile_cols(width);
     for (int i = 0; i < nslabs; i++) {
         c->slabs[i].tz = SLAB_EMPTY;
         c->slabs[i].chroma = malloc(planes);
         if (with_conf)
-            c->slabs[i].conf = malloc(planes);
-        if (!c->slabs[i].chroma || (with_conf && !c->slabs[i].conf)) {
+            c->slabs[i].tile_w = malloc(grid);
+        if (!c->slabs[i].chroma || (with_conf && !c->slabs[i].tile_w)) {
             comp_t3d_cache_free(c);
             return -1;
         }
@@ -760,7 +779,7 @@ void comp_t3d_cache_free(comp_t3d_cache_t *c)
         return;
     for (int i = 0; i < c->nslabs; i++) {
         free(c->slabs[i].chroma);
-        free(c->slabs[i].conf);
+        free(c->slabs[i].tile_w);
     }
     free(c->slabs);
     c->slabs = NULL;
@@ -862,8 +881,6 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
         ph |= (unsigned)((tz + z + parity) & 1) << z;
 
     memset(s->chroma, 0, sizeof(float) * ZTILE * plane);
-    if (s->conf)
-        memset(s->conf, 0, sizeof(float) * ZTILE * plane);
 
     for (int tile_y = -YTILE / 2; tile_y < frame_lines; tile_y += YTILE / 2) {
         const int start_y = tile_y < 0 ? -tile_y : 0;
@@ -921,11 +938,12 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                 fftwf_execute_dft_c2r(t->inverse, cplx_out.cplx, real);
             }
 
-            /* the confidence uses the same unity-sum window weights */
+            if (s->tile_w)
+                s->tile_w[(tile_y + YTILE / 2) / (YTILE / 2) * tile_cols(width)
+                          + (tile_x + XTILE / 2) / (XTILE / 2)] = w;
             for (int z = 0; z < ZTILE; z++) {
                 const int g = tz + z;
                 float *cb = s->chroma + z * plane;
-                float *wb = s->conf ? s->conf + z * plane : NULL;
                 for (int y = start_y; y < end_y; y++) {
                     const int fl = tile_y + y;
                     if (((fl + parity) & 1) != (g & 1))
@@ -934,11 +952,6 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                     for (int x = start_x; x < end_x; x++)
                         b[tile_x + x] += real[(z * YTILE + y) * XTILE + x]
                                          / (ZTILE * YTILE * XTILE);
-                    if (wb) {
-                        float *bw = wb + (fl >> 1) * width;
-                        for (int x = start_x; x < end_x; x++)
-                            bw[tile_x + x] += w * t->window[z][y][x];
-                    }
                 }
             }
         }
@@ -962,8 +975,6 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
     const size_t plane = (size_t)field_rows * width;
 
     memset(s->chroma, 0, sizeof(float) * ZTILE * plane);
-    if (s->conf)
-        memset(s->conf, 0, sizeof(float) * ZTILE * plane);
 
     for (int tile_r = -YTILE_PAL / 2; tile_r < field_rows + SHIFT_MAX;
          tile_r += YTILE_PAL / 2) {
@@ -1014,10 +1025,12 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                 fftwf_execute_dft_c2r(t->inverse, cplx_out.cplx, real);
             }
 
+            if (s->tile_w)
+                s->tile_w[(tile_r + YTILE_PAL / 2) / (YTILE_PAL / 2) * tile_cols(width)
+                          + (tile_x + XTILE / 2) / (XTILE / 2)] = w;
             for (int z = 0; z < ZTILE; z++) {
                 const int sz = (z + 1) / 2;
                 float *cb = s->chroma + z * plane;
-                float *wb = s->conf ? s->conf + z * plane : NULL;
                 for (int y = 0; y < YTILE_PAL; y++) {
                     const int r = tile_r + y - sz;
                     if (r < 0 || r >= field_rows)
@@ -1026,14 +1039,55 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                     for (int x = start_x; x < end_x; x++)
                         b[tile_x + x] += real[(z * YTILE_PAL + y) * XTILE + x]
                                          / (ZTILE * YTILE_PAL * XTILE);
-                    if (wb) {
-                        float *bw = wb + (size_t)r * width;
-                        for (int x = start_x; x < end_x; x++)
-                            bw[tile_x + x] += w * t->window[z][y][x];
-                    }
                 }
             }
         }
+    }
+}
+
+/* One row of slab plane z's confidence, rebuilt from the per-tile
+ * values: the builders would accumulate w * window onto a zeroed plane,
+ * and every sample lies in exactly two tile rows (a, then b) and two
+ * tile columns (a, then b) of the half-overlapped grid, so the same four
+ * products added in the same raster order onto 0 give the same bits.
+ * With add set the row is added to dst, otherwise it is stored. */
+static void slab_conf_row(const comp_transform3d_t *t,
+                          const comp_t3d_slab_t *s, int z, int r, int width,
+                          float *dst, int add)
+{
+    /* the sample's row on the tile grid: PAL's displaced field-line
+     * lattice, or NTSC's frame lines */
+    const int half = t->standard == COMP_STD_PAL ? YTILE_PAL / 2 : YTILE / 2;
+    const int c = t->standard == COMP_STD_PAL
+        ? r + (z + 1) / 2
+        : 2 * r + ((s->tz + z + s->parity) & 1);
+    const float *win_a = t->window[z][c % half + half];
+    const float *win_b = t->window[z][c % half];
+    const int ncols = tile_cols(width);
+    const float *wa = s->tile_w + (c / half) * ncols;
+    const float *wb = wa + ncols;
+
+    for (int x0 = 0; x0 < width; x0 += XTILE / 2) {
+        const int k = x0 / (XTILE / 2);
+        const float waa = wa[k], wab = wa[k + 1];
+        const float wba = wb[k], wbb = wb[k + 1];
+        const int n = width - x0 < XTILE / 2 ? width - x0 : XTILE / 2;
+        float *o = dst + x0;
+        float v[XTILE / 2];
+        for (int j = 0; j < n; j++) {
+            float a = 0.0f;
+            a += waa * win_a[j + XTILE / 2];
+            a += wab * win_a[j];
+            a += wba * win_b[j + XTILE / 2];
+            a += wbb * win_b[j];
+            v[j] = a;
+        }
+        if (add)
+            for (int j = 0; j < n; j++)
+                o[j] += v[j];
+        else
+            for (int j = 0; j < n; j++)
+                o[j] = v[j];
     }
 }
 
@@ -1090,11 +1144,10 @@ void comp_transform3d_frame(const comp_transform3d_t *t, comp_t3d_cache_t *c,
                 dc[r * chroma_stride + x] =
                     clamp_i16(round_i32(p1[r * width + x] + p2[r * width + x]));
         if (dw) {
-            const float *q1 = s1->conf + (g - s1->tz) * plane;
-            const float *q2 = s2->conf + (g - s2->tz) * plane;
-            for (int r = 0; r < field_rows; r++)
-                for (int x = 0; x < width; x++)
-                    dw[r * conf_stride + x] = q1[r * width + x] + q2[r * width + x];
+            for (int r = 0; r < field_rows; r++) {
+                slab_conf_row(t, s1, g - s1->tz, r, width, dw + r * conf_stride, 0);
+                slab_conf_row(t, s2, g - s2->tz, r, width, dw + r * conf_stride, 1);
+            }
         }
     }
 
