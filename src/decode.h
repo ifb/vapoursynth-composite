@@ -61,7 +61,7 @@ typedef struct comp_split3d_cand_t {
 /* Adaptive 3D comb candidate selection for one NTSC row, x in
  * [3, w - 3) (the caller writes the edge samples): pick the
  * lowest-penalty candidate, earliest index winning ties, and emit
- * clamp_i16(lrintf(tc)) with tc = c2c[x] for a same-frame winner or
+ * clamp_i16(round_i32(tc)) with tc = c2c[x] for a same-frame winner or
  * (c1c[x] - sample) / 2 otherwise. irescale is passed by pointer to
  * keep the asm ABI GPR-only. w - 6 must be a multiple of 16. */
 typedef void (*comp_split3d_row_fn)(int16_t *out, const float *c1c,

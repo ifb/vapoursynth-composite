@@ -703,7 +703,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                 const float *cw = conf + fr * chroma_stride;
                 for (int x = 0; x < w; x++) {
                     const float c2 = cw[x] * cw[x];
-                    int32_t wq = (int32_t)lrintf(c2 * c2 * 32768.0f);
+                    int32_t wq = round_i32(c2 * c2 * 32768.0f);
                     wq = wq < 0 ? 0 : wq > 32768 ? 32768 : wq;
                     u_eq[x] = u_nar[x]
                         + (int32_t)(((int64_t)wq * (u_eq[x] - u_nar[x])) >> 15);
@@ -718,7 +718,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                         acc->sumsq += (double)cw[x] * cw[x];
                         if (om) {
                             float c = cw[x] < 0.0f ? 0.0f : cw[x] > 1.0f ? 1.0f : cw[x];
-                            om[x] = (uint16_t)lrintf((1.0f - c) * 65535.0f);
+                            om[x] = (uint16_t)round_i32((1.0f - c) * 65535.0f);
                         }
                     }
                     acc->n += w;
@@ -1109,7 +1109,7 @@ static void split3d_row_c(int16_t *out, const float *c1c, const float *c2c,
         for (int x = 0; x < n; x++) {
             const float tc = best_same[x] ? c2c[x0 + x]
                                           : (c1c[x0 + x] - best_sample[x]) / 2.0f;
-            out[x0 + x] = clamp_i16(lrintf(tc));
+            out[x0 + x] = clamp_i16(round_i32(tc));
         }
     }
 }
@@ -1204,9 +1204,9 @@ static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
         d->split3d_row(out, c1c, c2c, ref, cand, &irescale, w);
 
         for (int x = 0; x < 3; x++)
-            out[x] = clamp_i16(lrintf(c2c[x]));
+            out[x] = clamp_i16(round_i32(c2c[x]));
         for (int x = w - 3; x < w; x++)
-            out[x] = clamp_i16(lrintf(c2c[x]));
+            out[x] = clamp_i16(round_i32(c2c[x]));
     }
 }
 
@@ -1298,14 +1298,14 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
                     acc->sumsq += (double)conf[x] * conf[x];
                     if (om) {
                         float c = conf[x] < 0.0f ? 0.0f : conf[x] > 1.0f ? 1.0f : conf[x];
-                        om[x] = (uint16_t)lrintf((1.0f - c) * 65535.0f);
+                        om[x] = (uint16_t)round_i32((1.0f - c) * 65535.0f);
                     }
                 }
                 acc->n += w;
             }
             for (int x = 0; x < w; x++) {
                 const float c2 = conf[x] * conf[x];
-                int32_t wq = (int32_t)lrintf(c2 * c2 * 32768.0f);
+                int32_t wq = round_i32(c2 * c2 * 32768.0f);
                 wq = wq < 0 ? 0 : wq > 32768 ? 32768 : wq;
                 u_eq[x] = u_nar[x]
                     + (int32_t)(((int64_t)wq * (u_eq[x] - u_nar[x])) >> 15);
@@ -1542,7 +1542,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             /* quantise the separated chroma for the fixed-point demod;
              * the 3D path below quantises inside the frame sum instead */
             for (int i = 0; i < w * rows; i++)
-                s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
+                s->chroma[i] = clamp_i16(round_i32(s->chroma_f[i]));
         } else {
             /* build the field stack the covering 3D tiles need; the
              * views are edge-clamped frames, so out-of-clip fields
@@ -1648,7 +1648,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             ntsc_comb1d(d, rows, comp, comp_stride, s->chroma_f);
             ntsc_comb2d(d, rows, s->chroma_f, s->tmp3);
             for (int i = 0; i < w * rows; i++)
-                s->chroma[i] = clamp_i16(lrintf(s->tmp3[i]));
+                s->chroma[i] = clamp_i16(round_i32(s->tmp3[i]));
         } else {
             const float *c1[3], *c2[3];
             for (int k = 0; k < 3; k++) {

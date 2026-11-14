@@ -1085,7 +1085,7 @@ void comp_transform3d_frame(const comp_transform3d_t *t, comp_t3d_cache_t *c,
         for (int r = 0; r < field_rows; r++)
             for (int x = 0; x < width; x++)
                 dc[r * chroma_stride + x] =
-                    clamp_i16(lrintf(p1[r * width + x] + p2[r * width + x]));
+                    clamp_i16(round_i32(p1[r * width + x] + p2[r * width + x]));
         if (dw) {
             const float *q1 = s1->conf + (g - s1->tz) * plane;
             const float *q2 = s2->conf + (g - s2->tz) * plane;
