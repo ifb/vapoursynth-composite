@@ -18,6 +18,15 @@ add_project_arguments(cc.get_supported_arguments('-fno-math-errno',
                                                  '-fno-trapping-math'),
                       language: 'c')
 
+# No FMA contraction in C. gcc's ISO C modes leave it off, but clang
+# contracts by default, and with FMA in the target (the per-CPU builds)
+# that changes the output, including in float heuristics whose results
+# feed discrete choices (ntsc_comb2d -> split3d's candidate compare).
+# The STDC FP_CONTRACT pragma does not override -ffp-contract=fast on
+# gcc, so pin it with the flag.
+add_project_arguments(cc.get_supported_arguments('-ffp-contract=off'),
+                      language: 'c')
+
 py = import('python').find_installation(pure: false)
 
 incdir = include_directories(
@@ -33,9 +42,9 @@ fftw3f_dep = dependency('fftw3f', static: host_machine.system() == 'darwin')
 threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
 
-core_sources = files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c',
-                     'src/transform3d.c', 'src/fft.c', 'src/cpu.c',
-                     'src/fir_row.c', 'src/geom.c')
+core_sources = files('src/subcarrier.c', 'src/encode.c', 'src/decode.c',
+                     'src/transform2d.c', 'src/transform3d.c', 'src/fft.c',
+                     'src/cpu.c', 'src/fir_row.c', 'src/geom.c')
 
 if host_machine.cpu_family() == 'x86_64'
     add_languages('nasm', native: false)
@@ -57,24 +66,10 @@ if host_machine.cpu_family() == 'x86_64'
                           'x86/demod_pq.asm')
 endif
 
-# decode.c's float separation heuristics feed discrete candidate choices
-# (ntsc_comb2d -> split3d compare), so FMA contraction there would change
-# the 3D output and break the byte-identical SIMD contract. ISO C modes
-# default this off, but pin it so the reference is stable under any -std
-# (the STDC FP_CONTRACT pragma does not override -ffp-contract=fast on gcc).
-decode_lib = static_library('composite_decode',
-    files('src/decode.c'),
-    c_args: cc.get_supported_arguments('-ffp-contract=off'),
-    dependencies: core_deps,
-    gnu_symbol_visibility: 'hidden',
-    pic: true,
-)
-
 core = static_library('composite_core',
     core_sources,
     dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
-    link_whole: decode_lib,
     pic: true,
 )
 

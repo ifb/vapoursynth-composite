@@ -1,7 +1,6 @@
 /*
  * Q15 FIR row kernels: scalar references and SIMD dispatch. Both are
- * pure integer (no float, so the encoder's contraction-on build and the
- * decoder's -ffp-contract=off build produce identical results).
+ * pure integer.
  */
 
 #include "cpu.h"
