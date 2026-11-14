@@ -248,10 +248,15 @@ static void fft_inv_pal_c(float *real, float *band)
 }
 
 #if defined(__x86_64__)
-void comp_fft_dif_avx2(float *base, int n, ptrdiff_t stride, int count,
-                       ptrdiff_t cstride, const float *tw);
-void comp_fft_dit_avx2(float *base, int n, ptrdiff_t stride, int count,
-                       ptrdiff_t cstride, const float *tw);
+#define FFT_PASS_ASM(name)                                                  \
+    void comp_fft_##name##_avx2(float *base, ptrdiff_t stride, int count,   \
+                                ptrdiff_t cstride, const float *tw)
+FFT_PASS_ASM(dif8);
+FFT_PASS_ASM(dit8);
+FFT_PASS_ASM(dif16);
+FFT_PASS_ASM(dit16);
+FFT_PASS_ASM(dif32);
+FFT_PASS_ASM(dit32);
 void comp_fft_x_fwd_avx2(float *band, const float *real, int nrows);
 void comp_fft_x_inv_avx2(float *real, const float *band, int nrows);
 
@@ -260,36 +265,36 @@ void comp_fft_x_inv_avx2(float *real, const float *band, int nrows);
 static void fft_fwd_ntsc_avx2(float *band, const float *real)
 {
     comp_fft_x_fwd_avx2(band, real, ZT * COMP_T3D_YTILE);
-    comp_fft_dif_avx2(band, COMP_T3D_YTILE, ROWB, ZT,
-                      COMP_T3D_YTILE * ROWB, (const float *)tw32);
-    comp_fft_dif_avx2(band, ZT, COMP_T3D_YTILE * ROWB, COMP_T3D_YTILE,
-                      ROWB, (const float *)tw8);
+    comp_fft_dif32_avx2(band, ROWB, ZT, COMP_T3D_YTILE * ROWB,
+                        (const float *)tw32);
+    comp_fft_dif8_avx2(band, COMP_T3D_YTILE * ROWB, COMP_T3D_YTILE, ROWB,
+                       (const float *)tw8);
 }
 
 static void fft_fwd_pal_avx2(float *band, const float *real)
 {
     comp_fft_x_fwd_avx2(band, real, ZT * COMP_T3D_YTILE_PAL);
-    comp_fft_dif_avx2(band, COMP_T3D_YTILE_PAL, ROWB, ZT,
-                      COMP_T3D_YTILE_PAL * ROWB, (const float *)tw16);
-    comp_fft_dif_avx2(band, ZT, COMP_T3D_YTILE_PAL * ROWB,
-                      COMP_T3D_YTILE_PAL, ROWB, (const float *)tw8);
+    comp_fft_dif16_avx2(band, ROWB, ZT, COMP_T3D_YTILE_PAL * ROWB,
+                        (const float *)tw16);
+    comp_fft_dif8_avx2(band, COMP_T3D_YTILE_PAL * ROWB, COMP_T3D_YTILE_PAL,
+                       ROWB, (const float *)tw8);
 }
 
 static void fft_inv_ntsc_avx2(float *real, float *band)
 {
-    comp_fft_dit_avx2(band, ZT, COMP_T3D_YTILE * ROWB, COMP_T3D_YTILE,
-                      ROWB, (const float *)tw8);
-    comp_fft_dit_avx2(band, COMP_T3D_YTILE, ROWB, ZT,
-                      COMP_T3D_YTILE * ROWB, (const float *)tw32);
+    comp_fft_dit8_avx2(band, COMP_T3D_YTILE * ROWB, COMP_T3D_YTILE, ROWB,
+                       (const float *)tw8);
+    comp_fft_dit32_avx2(band, ROWB, ZT, COMP_T3D_YTILE * ROWB,
+                        (const float *)tw32);
     comp_fft_x_inv_avx2(real, band, ZT * COMP_T3D_YTILE);
 }
 
 static void fft_inv_pal_avx2(float *real, float *band)
 {
-    comp_fft_dit_avx2(band, ZT, COMP_T3D_YTILE_PAL * ROWB,
-                      COMP_T3D_YTILE_PAL, ROWB, (const float *)tw8);
-    comp_fft_dit_avx2(band, COMP_T3D_YTILE_PAL, ROWB, ZT,
-                      COMP_T3D_YTILE_PAL * ROWB, (const float *)tw16);
+    comp_fft_dit8_avx2(band, COMP_T3D_YTILE_PAL * ROWB, COMP_T3D_YTILE_PAL,
+                       ROWB, (const float *)tw8);
+    comp_fft_dit16_avx2(band, ROWB, ZT, COMP_T3D_YTILE_PAL * ROWB,
+                        (const float *)tw16);
     comp_fft_x_inv_avx2(real, band, ZT * COMP_T3D_YTILE_PAL);
 }
 #endif

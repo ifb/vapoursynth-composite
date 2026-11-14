@@ -7,9 +7,7 @@
 SECTION .text
 
 ; The y/z passes: butterfly elements are 64-byte band rows (two ymm),
-; complex values interleaved re,im, twiddles splatted scalars. The
-; per-j twiddle byte step doubles (DIF) or halves (DIT) each stage and
-; also encodes the block count, so there are no divisions.
+; complex values interleaved re,im, twiddles splatted scalars.
 
 ; t = cmul(d, w): even lanes d.re*wr - d.im*wi, odd d.im*wr + d.re*wi
 %macro CMUL 4 ; d, t, wr, wi
@@ -25,107 +23,221 @@ SECTION .text
     vfmsubadd231ps %2, %1, %3
 %endmacro
 
-; void fft_dif(float *base, int n, ptrdiff_t stride, int count,
-;              ptrdiff_t cstride, const float *tw)
+; The y/z passes keep two or three radix-2 stages in registers per
+; load/store sweep: the tile stays in L1, so the stage-per-sweep form
+; spent its time on stores. Each butterfly is the same operation on the
+; same operands as a lone stage would perform, and butterflies within a
+; stage are independent, so the result does not depend on the grouping.
+; A group is 2^k elements at positions e0 + m*sp (m = 0 .. 2^k - 1)
+; within one transform, held one row half (four complex columns) at a
+; time in m0 .. m(2^k - 1); m8 is the butterfly temp, m10/m11 the
+; splatted twiddle.
+
+; DIF butterfly in place: lower = a + b, upper = (a - b) * w
+%macro DIF_BF 2 ; lower, upper
+    subps        m8, %1, %2
+    addps        %1, %1, %2
+    CMUL         m8, %2, m10, m11
+%endmacro
+
+; DIT butterfly in place: t = b * conj(w), lower = a + t, upper = a - t
+%macro DIT_BF 2 ; lower, upper
+    CMULC        %2, m8, m10, m11
+    subps        %2, %1, m8
+    addps        %1, %1, m8
+%endmacro
+
+; splat twiddle tw[%1] unless the registers already hold it
+%macro TWLOAD 1
+%if %1 != twcur
+    vbroadcastss m10, [twq + %1*8]
+    vbroadcastss m11, [twq + %1*8 + 4]
+%assign twcur %1
+%endif
+%endmacro
+
+; one stage of length %4 over the group: the element at position e
+; pairs with e + %4/2 when e mod %4 < %4/2, twiddle index
+; (e mod %4) * (n / %4), exactly as the stage-at-a-time loop indexes it
+%macro STAGE 6 ; dif, k, n, L, e0, sp
+%assign %%h %4 / 2
+%assign %%d %%h / %6
+%assign %%m 0
+%rep 1 << %2
+%assign %%e %5 + %%m * %6
+%assign %%r %%e - (%%e / %4) * %4
+%if %%r < %%h
+%assign %%p %%m + %%d
+    TWLOAD       %%r * (%3 / %4)
+%if %1
+    DIF_BF       m %+ %%m, m %+ %%p
+%else
+    DIT_BF       m %+ %%m, m %+ %%p
+%endif
+%endif
+%assign %%m %%m + 1
+%endrep
+%endmacro
+
+; element %1's address at byte offset %2: a + m*s1, or a4 + (m-4)*s1
+; above four (a4 = a + 4*s1, s3 = 3*s1)
+%macro EADDR 2 ; m, byte offset
+%if %1 < 4
+%xdefine %%b aq
+%else
+%xdefine %%b a4q
+%endif
+%assign %%q %1 & 3
+%if %%q == 0
+%xdefine EA [%%b + %2]
+%elif %%q == 1
+%xdefine EA [%%b + s1q + %2]
+%elif %%q == 2
+%xdefine EA [%%b + s1q*2 + %2]
+%else
+%xdefine EA [%%b + s3q + %2]
+%endif
+%endmacro
+
+; load, transform and store one group for both row halves. DIF runs
+; its stages from the longest (%4) down, DIT from the shortest up.
+%macro GROUP 6 ; dif, k, n, longest stage, e0, sp
+%assign %%off 0
+%rep 2
+%assign twcur -1
+%assign %%m 0
+%rep 1 << %2
+    EADDR        %%m, %%off
+    movu         m %+ %%m, EA
+%assign %%m %%m + 1
+%endrep
+%assign %%s 0
+%rep %2
+%if %1
+%assign %%L %4 >> %%s
+%else
+%assign %%L %4 >> (%2 - 1 - %%s)
+%endif
+    STAGE        %1, %2, %3, %%L, %5, %6
+%assign %%s %%s + 1
+%endrep
+%assign %%m 0
+%rep 1 << %2
+    EADDR        %%m, %%off
+    movu         EA, m %+ %%m
+%assign %%m %%m + 1
+%endrep
+%assign %%off %%off + 32
+%endrep
+%endmacro
+
+; void fft_dif8 / fft_dit8(float *base, ptrdiff_t stride, int count,
+;                          ptrdiff_t cstride, const float *tw)
 ;
-; Full n-point decimation-in-frequency FFT (radix-2, natural-order
-; input, bit-reversed output) over `count` independent transforms:
-; element e of transform r is the 64-byte row at
-; base + r*cstride + e*stride. tw holds n/2 interleaved twiddles
-; e^{-2pi i k/n}. fft_dit is the inverse: bit-reversed input, natural
-; output, conjugate twiddles, unnormalized.
-%macro FFT_PASS 1 ; 1 = dif, 0 = dit
+; count independent 8-point transforms, element e of transform r the
+; 64-byte row at base + r*cstride + e*stride; all three stages at once.
+; DIF: natural-order input, bit-reversed output; DIT the inverse with
+; conjugate twiddles, unnormalized. tw holds the 4 twiddles e^{-2pi i k/8}.
+%macro FFT8 1 ; 1 = dif, 0 = dit
 %if %1
-cglobal fft_dif, 6, 15, 10, base, n, stride, count, cstride, tw, \
-                            len, tsb, halfb, jcnt, twp, aj, a, blk, rep
-    mov          tsbd, 8
-    mov          lend, nd
+cglobal fft_dif8, 5, 9, 12, base, stride, count, cstride, tw, a, a4, s1, s3
 %else
-cglobal fft_dit, 6, 15, 10, base, n, stride, count, cstride, tw, \
-                            len, tsb, halfb, jcnt, twp, aj, a, blk, rep
-    mov          tsbd, nd
-    shl          tsbd, 2            ; 8 * (n/2)
-    mov          lend, 2
+cglobal fft_dit8, 5, 9, 12, base, stride, count, cstride, tw, a, a4, s1, s3
 %endif
-.stage:
-    mov          halfbd, lend
-    shr          halfbd, 1
-    imul         halfbq, strideq    ; half the block, in bytes
-    mov          jcntd, lend
-    shr          jcntd, 1
-    mov          twpq, twq
-    mov          ajq, baseq
-.j:
-    vbroadcastss m8, [twpq]
-    vbroadcastss m9, [twpq + 4]
-    mov          aq, ajq
-    mov          blkd, tsbd
-    shr          blkd, 3            ; block count = n/len
-.blk:
-    mov          repd, countd
+    mov          s1q, strideq
+    lea          s3q, [strideq*3]
 .rep:
-%if %1
-    movu         m0, [aq]
-    movu         m1, [aq + 32]
-    movu         m2, [aq + halfbq]
-    movu         m3, [aq + halfbq + 32]
-    addps        m4, m0, m2
-    addps        m5, m1, m3
-    subps        m0, m2
-    subps        m1, m3
-    movu         [aq], m4
-    movu         [aq + 32], m5
-    CMUL         m0, m6, m8, m9
-    CMUL         m1, m7, m8, m9
-    movu         [aq + halfbq], m6
-    movu         [aq + halfbq + 32], m7
-%else
-    movu         m2, [aq + halfbq]
-    movu         m3, [aq + halfbq + 32]
-    CMULC        m2, m6, m8, m9
-    CMULC        m3, m7, m8, m9
-    movu         m0, [aq]
-    movu         m1, [aq + 32]
-    addps        m4, m0, m6
-    addps        m5, m1, m7
-    subps        m0, m6
-    subps        m1, m7
-    movu         [aq], m4
-    movu         [aq + 32], m5
-    movu         [aq + halfbq], m0
-    movu         [aq + halfbq + 32], m1
-%endif
-    add          aq, cstrideq
-    dec          repd
+    mov          aq, baseq
+    lea          a4q, [aq + s1q*4]
+    GROUP        %1, 3, 8, 8, 0, 1
+    add          baseq, cstrideq
+    dec          countd
     jg .rep
-    ; rewind the reps, step to the next block
-    mov          repd, countd
-    imul         repq, cstrideq
-    sub          aq, repq
-    lea          aq, [aq + halfbq*2]
-    dec          blkd
-    jg .blk
-    add          ajq, strideq
-    add          twpq, tsbq
-    dec          jcntd
-    jg .j
-%if %1
-    shr          lend, 1
-    shl          tsbd, 1
-    cmp          lend, 2
-    jge .stage
+    RET
+%endmacro
+
+; The stages from %1 down to 8 for one transform, as four groups at
+; positions j + 4m (j = 0..3); r holds the transform's base, s1/s3 are
+; set for a 4-row element spacing.
+%macro LONG_STAGES 2 ; dif, n
+%assign %%j 0
+%rep 4
+%if %%j == 0
+    mov          aq, rq
+%elif %%j == 3
+    lea          aq, [rq + strideq*2]
+    add          aq, strideq
 %else
-    shl          lend, 1
-    shr          tsbd, 1
-    cmp          lend, nd
-    jle .stage
+    lea          aq, [rq + strideq*%%j]
+%endif
+    lea          a4q, [aq + s1q*4]
+%if %2 == 32
+    GROUP        %1, 3, %2, %2, %%j, 4
+%else
+    GROUP        %1, 2, %2, %2, %%j, 4
+%endif
+%assign %%j %%j + 1
+%endrep
+%endmacro
+
+; void fft_dif16 / 32, fft_dit16 / 32(float *base, ptrdiff_t stride,
+;                                     int count, ptrdiff_t cstride,
+;                                     const float *tw)
+;
+; As FFT8 for n = 16 or 32 points: the stages from n down to 8 in one
+; sweep (groups of n/4 elements spaced 4 rows apart), the stages 4 and 2
+; in another (groups of 4 consecutive rows). DIT runs the sweeps in the
+; opposite order. tw holds the n/2 twiddles e^{-2pi i k/n}.
+%macro FFTN 2 ; 1 = dif / 0 = dit, n
+%if %1
+cglobal fft_dif%2, 5, 12, 12, base, stride, count, cstride, tw, a, a4, s1, s3, r, cnt, b
+%else
+cglobal fft_dit%2, 5, 12, 12, base, stride, count, cstride, tw, a, a4, s1, s3, r, cnt, b
+%endif
+%if %1 == 0
+    SHORT_SWEEP  %1, %2
+%endif
+    lea          s1q, [strideq*4]
+    lea          s3q, [s1q*3]
+    mov          rq, baseq
+    mov          cntd, countd
+.long:
+    LONG_STAGES  %1, %2
+    add          rq, cstrideq
+    dec          cntd
+    jg .long
+%if %1
+    SHORT_SWEEP  %1, %2
 %endif
     RET
 %endmacro
 
+; stages 4 and 2 over every run of 4 consecutive rows of every transform
+%macro SHORT_SWEEP 2 ; dif, n
+    mov          s1q, strideq
+    lea          s3q, [strideq*3]
+    mov          rq, baseq
+    mov          cntd, countd
+%%trans:
+    mov          aq, rq
+    mov          bd, %2 / 4
+%%run:
+    GROUP        %1, 2, %2, 4, 0, 1
+    lea          aq, [aq + s1q*4]
+    dec          bd
+    jg %%run
+    add          rq, cstrideq
+    dec          cntd
+    jg %%trans
+%endmacro
+
 INIT_YMM avx2
-FFT_PASS 1
-FFT_PASS 0
+FFT8 1
+FFT8 0
+FFTN 1, 16
+FFTN 0, 16
+FFTN 1, 32
+FFTN 0, 32
 
 SECTION_RODATA 64
 
