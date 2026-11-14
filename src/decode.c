@@ -131,23 +131,26 @@ static void design_narrow(comp_decode_t *d, double fs_hz)
         assert(d->narrow_q15[j] == d->narrow_q15[COMP_NARROW_TAPS - 1 - j]);
 }
 
-/* stage a row into a zero-winged buffer and run the dispatched FIR;
- * the wings reproduce the former per-sample bounds check exactly */
-static void fir_row_staged(const comp_decode_t *d, const int32_t *coef,
-                           int taps, const int32_t *in, int32_t *out, int w)
-{
-    int32_t in_p[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COMP_EQ_TAPS - 1];
-    int32_t out_p[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+/* Rows the eq and narrow FIRs read: FIR_WING zeros before the w
+ * samples and zeros through the kernels' read span after them, so the
+ * filters read the producer's row in place (the wings reproduce the
+ * per-sample bounds check exactly). A buffer of FIR_ROW_LEN(w) holds
+ * the row FIR_WING in; producers write only [0, w), so the wings are
+ * cleared once per buffer. Outputs take COMP_FIR_ROW_ALIGN(w). */
+#define FIR_WING (COMP_EQ_TAPS / 2)
+#define FIR_ROW_LEN(w) (FIR_WING + COMP_FIR_ROW_ALIGN(w) + FIR_WING)
 
-    memset(in_p, 0, sizeof(in_p));
-    memcpy(in_p + taps / 2, in, sizeof(*in) * w);
-    d->fir_row(out_p, in_p, coef, taps, w);
-    memcpy(out, out_p, sizeof(*out) * w);
+_Static_assert(COMP_NARROW_TAPS <= COMP_EQ_TAPS, "narrow reads inside the eq wings");
+
+static void fir_wings_clear(int32_t *row, int w)
+{
+    memset(row - FIR_WING, 0, sizeof(*row) * FIR_WING);
+    memset(row + w, 0, sizeof(*row) * (COMP_FIR_ROW_ALIGN(w) - w + FIR_WING));
 }
 
 static void narrow_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int w)
 {
-    fir_row_staged(d, d->narrow_q15, COMP_NARROW_TAPS, in, out, w);
+    d->fir_row(out, in - COMP_NARROW_TAPS / 2, d->narrow_q15, COMP_NARROW_TAPS, w);
 }
 
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
@@ -443,7 +446,7 @@ static void scratch_release(comp_decode_t *d, comp_decode_scratch_t *s)
 /* equalize one row of demodulated chroma levels in place */
 static void eq_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int w)
 {
-    fir_row_staged(d, d->eq_q15, COMP_EQ_TAPS, in, out, w);
+    d->fir_row(out, in - COMP_EQ_TAPS / 2, d->eq_q15, COMP_EQ_TAPS, w);
 }
 
 /* Luma-guided chroma transient improvement: at a coincident
@@ -633,6 +636,14 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
     int16_t pr[4][2 * PR_STRIDE];
 
     memset(pr, 0, sizeof(pr));
+    /* the demod rows, read in place by the eq and narrow FIRs; the
+     * demod writes through its alignment, which must not reach the
+     * zeros past w */
+    _Static_assert(COMP_PAL_DEMOD_ALIGN(WIDTH) == WIDTH, "PAL demod overwrites the FIR wing");
+    int32_t u_buf[FIR_ROW_LEN(WIDTH)], v_buf[FIR_ROW_LEN(WIDTH)];
+    int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
+    fir_wings_clear(u_row, w);
+    fir_wings_clear(v_row, w);
     for (int fr = 0; fr < rows; fr++) {
         const int16_t *in0 = chroma + fr * chroma_stride;
         const int16_t *in1 = fr - 1 >= 0   ? chroma + (fr - 1) * chroma_stride : zero_line;
@@ -664,8 +675,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         uint16_t *outy = dsty + row * ystride;
         uint16_t *outu = dstu + row * ustride;
         uint16_t *outv = dstv + row * vstride;
-        int32_t u_row[COMP_PAL_DEMOD_ALIGN(WIDTH)], v_row[COMP_PAL_DEMOD_ALIGN(WIDTH)];
-        int32_t u_eq[WIDTH], v_eq[WIDTH];
+        int32_t u_eq[COMP_FIR_ROW_ALIGN(WIDTH)], v_eq[COMP_FIR_ROW_ALIGN(WIDTH)];
 
         d->pal_demod(u_row, v_row, &pr[0][0], PR_STRIDE, d->pal_demod_coef,
                      w, bp, bq, sc.vswitch);
@@ -687,7 +697,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                  * boosted cascade inverse (symmetric pairs, ~0.94 mean
                  * ratio; leak measures 0.3-0.8, and the fourth power
                  * widens the gap). */
-                int32_t u_nar[WIDTH], v_nar[WIDTH];
+                int32_t u_nar[COMP_FIR_ROW_ALIGN(WIDTH)], v_nar[COMP_FIR_ROW_ALIGN(WIDTH)];
                 narrow_row(d, u_row, u_nar, w);
                 narrow_row(d, v_row, v_nar, w);
                 const float *cw = conf + fr * chroma_stride;
@@ -1226,8 +1236,13 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     const int32_t s4[4] = { sn0, cs0, -sn0, -cs0 };
     const int32_t c4[4] = { cs0, -sn0, -cs0, sn0 };
 
-    int32_t u_row[COMP_ACTIVE_WIDTH_NTSC], v_row[COMP_ACTIVE_WIDTH_NTSC];
-    int32_t u_eq[COMP_ACTIVE_WIDTH_NTSC], v_eq[COMP_ACTIVE_WIDTH_NTSC];
+    int32_t u_buf[FIR_ROW_LEN(COMP_ACTIVE_WIDTH_NTSC)];
+    int32_t v_buf[FIR_ROW_LEN(COMP_ACTIVE_WIDTH_NTSC)];
+    int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
+    int32_t u_eq[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+    int32_t v_eq[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+    fir_wings_clear(u_row, w);
+    fir_wings_clear(v_row, w);
 
     d->demod_pq_row(p_row, q_row, s, d->demod_pq_coef, w);
 
@@ -1271,7 +1286,8 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
         if (d->eq == 2 && conf) {
             /* the PAL blend: confidence steers bandwidth from the
              * sub-nominal low-pass up to the boosted cascade inverse */
-            int32_t u_nar[COMP_ACTIVE_WIDTH_NTSC], v_nar[COMP_ACTIVE_WIDTH_NTSC];
+            int32_t u_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+            int32_t v_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
             narrow_row(d, u_row, u_nar, w);
             narrow_row(d, v_row, v_nar, w);
             if (acc) {
@@ -1322,14 +1338,19 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
     const int w = d->width;
     int16_t s[COMP_DEMOD_PQ_SPAN(COMP_ACTIVE_WIDTH_PAL)];
     int16_t *est = s + COMP_DEMOD_PQ_WING;
+    /* the rotated rows, read in place by the eq FIR */
+    int32_t u_buf[FIR_ROW_LEN(COMP_ACTIVE_WIDTH_PAL)], v_buf[FIR_ROW_LEN(COMP_ACTIVE_WIDTH_PAL)];
+    int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
 
     memset(s, 0, sizeof(s));
+    fir_wings_clear(u_row, w);
+    fir_wings_clear(v_row, w);
     for (int r = 0; r < rows; r++) {
         const uint16_t *line = comp + r * comp_stride;
         int32_t p_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
         int32_t q_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
-        int32_t u_row[COMP_ACTIVE_WIDTH_PAL], v_row[COMP_ACTIVE_WIDTH_PAL];
-        int32_t u_eq[COMP_ACTIVE_WIDTH_PAL], v_eq[COMP_ACTIVE_WIDTH_PAL];
+        int32_t u_eq[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+        int32_t v_eq[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
 
         /* the numerator spans +-131070 over 16-bit samples, so the
          * truncating quarter stays within +-32767 */
