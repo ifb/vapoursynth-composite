@@ -647,10 +647,10 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                      &d->cfilt_q16[0][0], w, bp, bq, sc.vswitch);
 
         /* luma is the composite minus the separated chroma */
-        for (int x = 0; x < w; x++) {
-            const int32_t yl = (int32_t)comp_row[x] - in0[x];
-            outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
-        }
+        int32_t yl_row[WIDTH];
+        for (int x = 0; x < w; x++)
+            yl_row[x] = (int32_t)comp_row[x] - in0[x] - d->level_black;
+        d->demod_quant_row(outy, yl_row, &d->mag_y, w);
 
         int32_t *u_out = u_row, *v_out = v_row;
         if (d->eq) {
@@ -698,10 +698,8 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
             cti_row(outy, u_out, v_out, w);
 
         /* invert the encoder's level mappings */
-        for (int x = 0; x < w; x++) {
-            outu[x] = clamp_u16(32768 + rdiv((int64_t)u_out[x] * 32768, d->ku));
-            outv[x] = clamp_u16(32768 + rdiv((int64_t)v_out[x] * 32768, d->kv));
-        }
+        d->demod_quant_row(outu, u_out, &d->mag_u, w);
+        d->demod_quant_row(outv, v_out, &d->mag_v, w);
     }
 }
 
