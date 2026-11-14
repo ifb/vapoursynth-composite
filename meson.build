@@ -58,20 +58,43 @@ if host_machine.cpu_family() == 'x86_64'
         nasm_args += '-DPREFIX'
     endif
     add_project_arguments(nasm_args, language: 'nasm')
-    core_sources += files('x86/cpu.asm', 'x86/pal_demod.asm', 'x86/fir_row.asm',
-                          'x86/split3d.asm', 'x86/lut_gain.asm',
-                          'x86/t3d_filter.asm', 'x86/comb2d.asm',
-                          'x86/demod_quant.asm', 'x86/demod_rotate.asm',
-                          'x86/encode_mod.asm', 'x86/fft.asm',
-                          'x86/demod_pq.asm')
+    asm_sources = files('x86/cpu.asm', 'x86/pal_demod.asm', 'x86/fir_row.asm',
+                        'x86/split3d.asm', 'x86/lut_gain.asm',
+                        'x86/t3d_filter.asm', 'x86/comb2d.asm',
+                        'x86/demod_quant.asm', 'x86/demod_rotate.asm',
+                        'x86/encode_mod.asm', 'x86/fft.asm',
+                        'x86/demod_pq.asm')
+    # The asm picks its own tier at run time, so every build shares it.
+    asm_libs = [static_library('composite_asm', asm_sources, pic: true)]
+else
+    asm_libs = []
 endif
 
-core = static_library('composite_core',
-    core_sources,
-    dependencies: core_deps,
-    gnu_symbol_visibility: 'hidden',
-    pic: true,
-)
+# The C is built once per x86 instruction-set level VapourSynth can
+# choose from: with name.so listed in a manifest, it loads name.avx2.so,
+# name.avx512.so or name.zn4.so when the CPU has the level and the file
+# exists. The flags are the ones VapourSynth documents for each level.
+cpu_levels = [['', []]]
+if host_machine.cpu_family() == 'x86_64'
+    cpu_levels += [
+        ['.avx2', ['-march=x86-64-v3']],
+        ['.avx512', ['-march=x86-64-v4']],
+        ['.zn4', ['-march=znver4', '-mno-sse4a', '-mno-avx512bf16']],
+    ]
+endif
+
+cores = []
+foreach level : cpu_levels
+    cores += static_library('composite_core' + level[0].replace('.', '_'),
+        core_sources,
+        c_args: level[1],
+        dependencies: core_deps,
+        gnu_symbol_visibility: 'hidden',
+        link_with: asm_libs,
+        pic: true,
+    )
+endforeach
+core = cores[0]
 
 # One module serves both hosts, as ffms2 does: each looks up only its own
 # entry point (VapourSynthPluginInit2 / avisynth_c_plugin_init), so the
@@ -93,16 +116,21 @@ endif
 # for them.
 plugin_install_dir = py.get_install_dir() / 'vapoursynth/plugins/composite'
 
-shared_module('composite',
-    plugin_sources,
-    dependencies: core_deps,
-    gnu_symbol_visibility: 'hidden',
-    include_directories: plugin_incdirs,
-    install: true,
-    install_dir: plugin_install_dir,
-    link_with: core,
-    name_prefix: '',
-)
+foreach i : range(cpu_levels.length())
+    level = cpu_levels[i]
+    shared_module('composite' + level[0],
+        plugin_sources,
+        c_args: level[1],
+        dependencies: core_deps,
+        gnu_symbol_visibility: 'hidden',
+        include_directories: plugin_incdirs,
+        install: true,
+        install_dir: plugin_install_dir,
+        link_args: level[1],
+        link_with: cores[i],
+        name_prefix: '',
+    )
+endforeach
 
 install_data('manifest.vs', install_dir: plugin_install_dir)
 

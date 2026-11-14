@@ -728,10 +728,14 @@ when the consumer is a comb decoder. Keep it off for cleanup.
 
 ## Installing
 
-**VapourSynth** (R75 or later): drop `composite.so`/`composite.dll` in
-your plugins autoload dir (or `core.std.LoadPlugin(...)`).
+**VapourSynth** (R75 or later): `pip install vapoursynth-composite`, or
+copy the `composite` folder (the module, its `.avx2`, `.avx512` and
+`.zn4` builds, and `manifest.vs`) into your plugins autoload dir as is.
+VapourSynth loads the highest-level build the CPU supports. With
+`core.std.LoadPlugin(...)`, give it the plain `composite.so` /
+`composite.dll` path and the same choice applies.
 
-**AviSynth+:** load the same module. The AviSynth frontend registers
+**AviSynth+:** load the plain module. The AviSynth frontend registers
 `composite_Encode`, `composite_Decode`, `composite_Restore`, and needs
 **avsresize** (`z_ConvertFormat`) loaded at runtime for the internal
 resampling - install it alongside.

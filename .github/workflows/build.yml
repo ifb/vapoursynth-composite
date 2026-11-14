@@ -22,7 +22,9 @@ jobs:
         meson test -C build -v
 
     - name: Run filter tests
-      run: python3 test/test_composite.py build/composite.so
+      run: |
+        python3 test/test_composite.py build/composite.so
+        python3 test/test_composite.py build/composite.avx2.so
 
     - name: Check for AVX-512 leaking into non-avx512 code
       run: |
@@ -181,31 +183,37 @@ jobs:
         strip $(find . -name '*.dll')
         wheel pack unpacked/*
 
-    # AviSynth users get the very same binary the wheel ships -- one
-    # module serves both hosts -- just lifted out as a drop-in file,
-    # since AviSynth has no package manager.
-    - name: Extract the standalone plugin DLL
+    # AviSynth users get the very same binaries the wheel ships -- one
+    # module serves both hosts -- just lifted out as drop-in files,
+    # since AviSynth has no package manager. It also has no per-CPU
+    # selection, so all four builds ship and the user installs one.
+    - name: Extract the standalone plugin DLLs
       run: |
         mkdir -p dist-dll
-        cp "$(find dist/unpacked -name 'composite*.dll' | head -1)" dist-dll/composite.dll
+        cp $(find dist/unpacked -name 'composite*.dll') dist-dll/
         ls -la dist-dll/
+        for level in "" .avx2 .avx512 .zn4; do
+          test -f "dist-dll/composite$level.dll"
+        done
 
     # AviSynth.dll must not appear as a load-time import, or the module
     # fails to load for VapourSynth users without AviSynth installed.
     - name: Check that AviSynth.dll is not a load-time dependency
       run: |
-        objdump -p dist-dll/composite.dll |
-          sed -n '/The Import Tables/,/^There is/p' > imports.txt
-        cat imports.txt
-        if grep -qi 'AviSynth.dll' imports.txt; then
-          echo "ERROR: AviSynth.dll is a load-time import; delay-loading is broken"
-          exit 1
-        fi
+        for dll in dist-dll/*.dll; do
+          objdump -p "$dll" |
+            sed -n '/The Import Tables/,/^There is/p' > imports.txt
+          cat imports.txt
+          if grep -qi 'AviSynth.dll' imports.txt; then
+            echo "ERROR: AviSynth.dll is a load-time import of $dll; delay-loading is broken"
+            exit 1
+          fi
+        done
 
     - uses: actions/upload-artifact@v7
       with:
         name: composite-avisynth-win64
-        path: dist-dll/composite.dll
+        path: dist-dll/*.dll
 
     - uses: actions/upload-artifact@v7
       with:
