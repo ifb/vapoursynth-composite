@@ -211,14 +211,25 @@ static void AVSC_CC comp_avs_dec_free(AVS_FilterInfo *fi)
     free(f);
 }
 
-/* avsresize reads _FieldBased per frame, but src_height is fixed at
- * construction, so a clip whose field-ness changes mid-stream follows
- * whatever frame 0 said. Does not consume `clip`. */
-static int comp_avs_clip_interlaced(AVS_ScriptEnvironment *env, AVS_Value clip)
+/* Whether avsresize will resample `clip` field-wise. It does so only for
+ * subsampled YUV with _FieldBased set; anything else (the 4:4:4 raster on
+ * the way back, the Y16 mask) is resampled as a whole frame even when the
+ * flag rides along on the frame props. avsresize reads _FieldBased per
+ * frame, but src_height is fixed at construction, so a clip whose
+ * field-ness changes mid-stream follows whatever frame 0 said. Does not
+ * consume `clip`. */
+static int comp_avs_clip_fieldwise(AVS_ScriptEnvironment *env, AVS_Value clip)
 {
     AVS_Clip *c = avs_take_clip(clip, env);
     if (!c)
         return 0;
+    const AVS_VideoInfo *vi = avs_get_video_info(c);
+    if (!avs_is_yuv(vi) || avs_is_y(vi) ||
+        (avs_get_plane_width_subsampling(vi, AVS_PLANAR_U) == 0 &&
+         avs_get_plane_height_subsampling(vi, AVS_PLANAR_U) == 0)) {
+        avs_release_clip(c);
+        return 0;
+    }
     AVS_VideoFrame *f = avs_get_frame(c, 0);
     int interlaced = 0;
     if (f) {
@@ -275,9 +286,9 @@ static AVS_Value comp_avs_zresize_f(AVS_ScriptEnvironment *env, AVS_Value clip,
         args[n] = avs_new_value_float((float)src_left);  names[n] = "src_left"; n++;
         args[n] = avs_new_value_float((float)src_width); names[n] = "src_width"; n++;
         /* every resample here is horizontal-only, so `height` is also the
-         * source height. Halving a progressive clip would resample just its
-         * top half. */
-        if (comp_avs_clip_interlaced(env, clip)) {
+         * source height. Halving it on a clip resampled as a whole frame
+         * would resample just its top half. */
+        if (comp_avs_clip_fieldwise(env, clip)) {
             args[n] = avs_new_value_float((float)(height / 2.0));
             names[n] = "src_height"; n++;
         }
