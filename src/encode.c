@@ -91,9 +91,12 @@ int comp_encode_init(comp_encode_t *e, int standard, int setup, int precomb)
 
     comp_sc_sin_q15(e->den, e->sin_q15);
 
+    /* positive taps summing to 32768 hold the int16 FIR's sums within
+     * 2^30 */
     for (int j = 0; j < e->uv_ntaps; j++)
-        e->uv_taps32[j] = e->uv_taps[j];
-    e->fir_row = comp_get_fir_row_q15_fn(comp_cpu_detect());
+        e->uv_taps16[j] = e->uv_taps[j];
+    e->uv_taps16[e->uv_ntaps] = 0;
+    e->fir_row = comp_get_fir_row_s16_fn(comp_cpu_detect());
     e->mod_row = comp_get_encode_mod_row_fn(comp_cpu_detect());
     return 0;
 }
@@ -145,25 +148,25 @@ void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
 {
     const int w = e->width;
     const int ntaps = e->uv_ntaps;
-    const int wa = COMP_FIR_ROW_ALIGN(w);
-    int32_t uf[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
-    int32_t vf[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+    const int span = COMP_FIR_S16_SPAN(w, ntaps);
+    int32_t uf[COMP_FIR_S16_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+    int32_t vf[COMP_FIR_S16_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
     /* staged FIR input: in[i] = src[i - ntaps/2] - 32768 for i-ntaps/2
      * in [0, w), 0 elsewhere -- centring the row and zeroing the wings
-     * reproduces the C bounds check (blanking carries no chroma). Sized
-     * for the kernel's read span, ALIGN(w) + ntaps - 1. */
-    int32_t us[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COMP_UV_MAXTAPS - 1];
-    int32_t vs[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COMP_UV_MAXTAPS - 1];
+     * reproduces the C bounds check (blanking carries no chroma). The
+     * offset lands exactly on int16. */
+    int16_t us[COMP_FIR_S16_SPAN(COMP_ACTIVE_WIDTH_PAL, COMP_UV_MAXTAPS)];
+    int16_t vs[COMP_FIR_S16_SPAN(COMP_ACTIVE_WIDTH_PAL, COMP_UV_MAXTAPS)];
     const int lo = ntaps / 2;
 
-    memset(us, 0, sizeof(int32_t) * (wa + ntaps - 1));
-    memset(vs, 0, sizeof(int32_t) * (wa + ntaps - 1));
+    memset(us, 0, sizeof(int16_t) * span);
+    memset(vs, 0, sizeof(int16_t) * span);
     for (int k = 0; k < w; k++) {
-        us[k + lo] = srcu[k] - 32768;
-        vs[k + lo] = srcv[k] - 32768;
+        us[k + lo] = (int16_t)(srcu[k] - 32768);
+        vs[k + lo] = (int16_t)(srcv[k] - 32768);
     }
-    e->fir_row(uf, us, e->uv_taps32, ntaps, w);
-    e->fir_row(vf, vs, e->uv_taps32, ntaps, w);
+    e->fir_row(uf, us, e->uv_taps16, ntaps, w);
+    e->fir_row(vf, vs, e->uv_taps16, ntaps, w);
 
     /* at 4xfsc the carrier advances exactly 90 degrees per sample, so a
      * line needs only its start-phase sine and cosine, cycled through a

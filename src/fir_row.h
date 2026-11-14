@@ -1,6 +1,6 @@
 /*
- * Q15 FIR row kernel, shared by the encoder's chroma low-pass and the
- * decoder's demodulator filters.
+ * Q15 FIR row kernels: 32-bit samples for the decoder's chroma
+ * filters, 16-bit for the encoder's chroma low-pass.
  */
 
 #ifndef COMP_FIR_ROW_H
@@ -25,5 +25,20 @@ typedef void (*comp_fir_row_q15_fn)(int32_t *out, const int32_t *in,
                                     const int32_t *coef, int taps, int w);
 
 comp_fir_row_q15_fn comp_get_fir_row_q15_fn(unsigned cpu);
+
+/* The same Q15 FIR over int16 samples and taps, accumulating in int32:
+ * out[x] = (sum_j coef[j] * in[x + j] + 16384) >> 15 for 0 <= x < w.
+ * Taps pair up, so coef holds taps rounded up to even with a zero pad,
+ * and the caller guarantees sum|coef| * 2^15 + 2^14 < 2^31. SIMD tiers
+ * write out through COMP_FIR_S16_ALIGN(w) and read in through
+ * COMP_FIR_S16_SPAN(w, taps), the wings and padding being the caller's
+ * zeros. */
+#define COMP_FIR_S16_ALIGN(w) (((w) + 31) & ~31)
+#define COMP_FIR_S16_SPAN(w, taps) (COMP_FIR_S16_ALIGN(w) + ((taps) + 1) / 2 * 2)
+
+typedef void (*comp_fir_row_s16_fn)(int32_t *out, const int16_t *in,
+                                    const int16_t *coef, int taps, int w);
+
+comp_fir_row_s16_fn comp_get_fir_row_s16_fn(unsigned cpu);
 
 #endif

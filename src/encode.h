@@ -40,8 +40,8 @@ struct comp_encode_t {
     int precomb;
     const int16_t *uv_taps;
     int uv_ntaps;
-    int32_t uv_taps32[COMP_UV_MAXTAPS]; /* uv_taps widened for the kernel */
-    comp_fir_row_q15_fn fir_row;
+    int16_t uv_taps16[COMP_UV_MAXTAPS + 1]; /* uv_taps, zero-padded to even */
+    comp_fir_row_s16_fn fir_row;
     comp_encode_mod_row_fn mod_row;
     int32_t ku, kv;              /* chroma level per Cb/Cr LSB, Q15 */
     int32_t level_black;
