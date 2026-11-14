@@ -944,15 +944,34 @@ void comp_demod_pq_init(int16_t coef[COMP_DEMOD_PQ_PAIRS][32],
 static void demod_pq_row_c(int32_t *p, int32_t *q, const int16_t *s,
                            const int16_t (*coef)[32], int w)
 {
-    for (int x = 0; x < w; x++) {
-        const int ph = 2 * (x & 3);
-        int32_t acc[2] = { 0, 0 };  /* even-j, odd-j taps */
+    enum { CHUNK = 128 };
+
+    for (int x0 = 0; x0 < w; x0 += CHUNK) {
+        const int n = w - x0 < CHUNK ? w - x0 : CHUNK;
+        /* [even-j or odd-j taps][x]; pairs outer and x inner in steps of
+         * the four carrier phases keep each pair's coefficients
+         * invariant across the inner loop */
+        int32_t acc[2][CHUNK];
+        memset(acc, 0, sizeof(acc));
+
         for (int i = 0; i < COMP_DEMOD_PQ_PAIRS; i++) {
             const int j = demod_pq_j[i];
-            acc[j & 1] += coef[i][ph] * s[x + j] + coef[i][ph + 1] * s[x + j + 2];
+            const int16_t *c = coef[i];
+            const int16_t *sx = s + x0 + j;
+            int32_t *a = acc[j & 1];
+            for (int x = 0; x < n; x += 4)
+                for (int l = 0; l < 4; l++)
+                    a[x + l] += c[2 * l] * sx[x + l] + c[2 * l + 1] * sx[x + l + 2];
         }
-        p[x] = (acc[!(x & 1)] + 16384) >> 15;
-        q[x] = (acc[x & 1] + 16384) >> 15;
+
+        /* a tap feeds p when x + j is odd; chunks start even, and the
+         * pair may run one sample into the 32-aligned padding */
+        for (int x = 0; x < n; x += 2) {
+            p[x0 + x] = (acc[1][x] + 16384) >> 15;
+            q[x0 + x] = (acc[0][x] + 16384) >> 15;
+            p[x0 + x + 1] = (acc[0][x + 1] + 16384) >> 15;
+            q[x0 + x + 1] = (acc[1][x + 1] + 16384) >> 15;
+        }
     }
 }
 
