@@ -76,8 +76,12 @@ void checkasm_test_pal_demod(void)
             for (int mode = 0; mode < 3; mode++) {
                 for (int i = 0; i < NWIDTHS; i++) {
                     const ptrdiff_t stride = i & 1 ? STRIDE2 : STRIDE1;
-                    const int32_t bp = (int32_t)(checkasm_rand() % 65535) - 32767;
-                    const int32_t bq = (int32_t)(checkasm_rand() % 65535) - 32767;
+                    /* [-32767, 32768], the negated sine table's range,
+                     * with the +32768 end forced on two widths */
+                    const int32_t bp = i == 2 ? 32768
+                                     : (int32_t)(checkasm_rand() % 65536) - 32767;
+                    const int32_t bq = i == 3 ? 32768
+                                     : (int32_t)(checkasm_rand() % 65536) - 32767;
                     const int32_t vsw = i & 2 ? -1 : 1;
                     for (int k = 0; k < 4 * 2 * MAXSTRIDE; k++)
                         pr_buf[k] = mode == 2 ? -32768

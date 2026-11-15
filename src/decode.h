@@ -26,9 +26,11 @@
  * and the carrier and vertical signs fold into per-phase coefficient
  * rows (comp_pal_demod_init). The Q16 filter over int16 lines keeps
  * every sum near 2^30, so int32 is exact and all tiers byte-identical.
- * bp/bq is the line's burst-phase unit vector (Q15), vswitch the PAL
- * switch sign. Writes u, v through COMP_PAL_DEMOD_ALIGN(w) and reads
- * pr through that plus 2 * COMP_DECODE_FILTER_SIZE pairs. */
+ * bp/bq is the line's burst-phase unit vector (Q15, each within
+ * [-32767, 32768]: the SIMD rotation multiplies their negations as
+ * int16), vswitch the PAL switch sign. Writes u, v through
+ * COMP_PAL_DEMOD_ALIGN(w) and reads pr through that plus
+ * 2 * COMP_DECODE_FILTER_SIZE pairs. */
 #define COMP_PAL_DEMOD_ROWS (4 + 8 * COMP_DECODE_FILTER_SIZE)
 #define COMP_PAL_DEMOD_ALIGN(w) (((w) + 15) & ~15)
 

@@ -8,9 +8,9 @@
 SECTION_RODATA 64
 
 d_rnd16:   times 16 dd 32768
-; ROTATE's shift-emulation biases (see util.asm)
-q_nbias14: times 8 dq (1 << 40) - 8192
-d_sub26:   times 16 dd 1 << 26
+d_rnd16m1: times 16 dd 32767
+d_hi16:    times 16 dd 0xFFFF0000
+d_m8192:   times 16 dd -8192
 
 SECTION .text
 
@@ -22,13 +22,14 @@ SECTION .text
     movu         m4, [%2 + xq*4 + %3]
 %if cpuflag(avx)
     pmaddwd      m4, [cfq + (%4)*64]
+    paddd        %1, m4
 %else
     ; legacy-SSE memory operands fault unless 16-byte aligned, and the
     ; table lives in a malloc'd decoder at no particular offset
     movu         m5, [cfq + (%4)*64]
     pmaddwd      m4, m5
-%endif
     paddd        %1, m4
+%endif
 %endmacro
 
 ; all four planes at tap position FS + %1 (coefficient rows from %2)
@@ -48,12 +49,30 @@ SECTION .text
 ; even/odd b, m2/m3 the c2/c3 planes. A tap lands on a sine sample when
 ; x + b is odd, so even lanes take their sine sums from the odd-b
 ; accumulators and odd lanes from the even-b ones.
+;
+; The rotation onto the U/V axes is one pmaddwd per output: the Q0
+; products stay within +-2^15 (the filter's sums are near 2^30 at most),
+; and -bp, -bq fit int16 for bp, bq in [-32767, 32768], so
+;   u = -(pu*bp + qu*bq + 8192) >> 14 = ((pu, qu) . (-bp, -bq) - 8192) >> 14
+;   v = ((qv, -pv) . (-bp, -bq) - 8192) >> 14, times vswitch
+; with -pv = (-(a_sn - b_cs) + 32767) >> 16, the exact negation of the
+; rounded shift.
 %macro PAL_DEMOD_ROW 0
-cglobal pal_demod_row, 6, 11, 16, u, v, pr, stride, cf, w, p1, p2, p3, x, t
+cglobal pal_demod_row, 6, 11, 13, u, v, pr, stride, cf, w, p1, p2, p3, x, t
     lea          tq, [strideq*4]
     lea          p1q, [prq + tq]
     lea          p2q, [prq + tq*2]
     lea          p3q, [p1q + tq*2]
+    ; the (-bp, -bq) word pair
+    mov          td, r6m
+    neg          td
+    movzx        td, tw
+    mov          xd, r7m
+    neg          xd
+    shl          xd, 16
+    or           td, xd
+    mov          r6m, td                  ; bp's own stack slot
+    SPLATD       m12, dword r6m
 %if mmsize == 64
     mov          td, 0xAAAA               ; k2 selects odd dword lanes (BLEND_ODD)
     kmovw        k2, td
@@ -65,6 +84,8 @@ cglobal pal_demod_row, 6, 11, 16, u, v, pr, stride, cf, w, p1, p2, p3, x, t
     setl         tb
     neg          td
     kmovw        k3, td
+%else
+    SPLATD       m11, dword r8m           ; vswitch
 %endif
     xor          xq, xq
 .loop:
@@ -92,39 +113,42 @@ cglobal pal_demod_row, 6, 11, 16, u, v, pr, stride, cf, w, p1, p2, p3, x, t
     BLEND_ODD    m5, m0, m1               ; c0/c1 on cosine samples
     BLEND_ODD    m6, m3, m2               ; c2/c3 on sine samples
     BLEND_ODD    m7, m2, m3               ; c2/c3 on cosine samples
-    ; pu = A_sn + B_cs, pv = A_sn - B_cs, qu = A_cs - B_sn,
-    ; qv = A_cs + B_sn; then the Q16 rounding to Q0
+    ; pu = A_sn + B_cs, -pv = B_cs - A_sn, qu = A_cs - B_sn,
+    ; qv = A_cs + B_sn; then the Q16 rounding to Q0, p in the low word
+    ; and q in the high word of each lane
     paddd        m0, m4, m7
-    psubd        m1, m4, m7
+    psubd        m1, m7, m4
     psubd        m2, m5, m6
     paddd        m3, m5, m6
     mova         m4, [d_rnd16]
     paddd        m0, m4
-    paddd        m1, m4
     paddd        m2, m4
     paddd        m3, m4
-    psrad        m0, 16                   ; pu0
-    psrad        m1, 16                   ; pv0
-    psrad        m2, 16                   ; qu0
-    psrad        m3, 16                   ; qv0
+    paddd        m1, [d_rnd16m1]
+    mova         m4, [d_hi16]
+    psrld        m0, 16                   ; pu0
+    pand         m2, m4                   ; qu0 << 16
+    psrld        m3, 16                   ; qv0
+    pand         m1, m4                   ; -pv0 << 16
+    por          m0, m2
+    por          m3, m1
+    mova         m4, [d_m8192]
 
-    SPLATD       m8, dword r6m            ; bp
-    SPLATD       m9, dword r7m            ; bq
+    pmaddwd      m0, m12
+    paddd        m0, m4
+    psrad        m0, 14
+    movu         [uq + xq*4], m0
 
-    ; u = -(pu0*bp + qu0*bq + 8192) >> 14
-    ROTATE       m10, m0, m8, m2, m9, paddq
-    movu         [uq + xq*4], m10
-
-    ; v = vswitch * (-(qv0*bp - pv0*bq + 8192) >> 14)
-    ROTATE       m10, m3, m8, m1, m9, psubq
+    pmaddwd      m3, m12
+    paddd        m3, m4
+    psrad        m3, 14
 %if mmsize == 64
-    vpxord       m11, m11, m11
-    vpsubd       m10{k3}, m11, m10        ; conditional negate by vswitch (k3)
+    vpxord       m5, m5, m5
+    vpsubd       m3{k3}, m5, m3           ; conditional negate by vswitch (k3)
 %else
-    SPLATD       m11, dword r8m           ; vswitch
-    psignd       m10, m11
+    psignd       m3, m11
 %endif
-    movu         [vq + xq*4], m10
+    movu         [vq + xq*4], m3
 
     add          xq, mmsize/4
     cmp          xd, wd
