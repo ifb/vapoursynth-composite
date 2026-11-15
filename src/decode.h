@@ -150,9 +150,12 @@ comp_demod_rotate_row_fn comp_get_demod_rotate_row_fn(unsigned cpu);
     9094, 3726, -503, -1597, -682, 200, 317, 73
 #define COMP_DEMOD_PQ_WING  (COMP_DEMOD_PQ_TAPS / 2)
 #define COMP_DEMOD_PQ_PAIRS 9
-/* p and q are written through ALIGN(w), s is read through SPAN(w) */
+/* p and q are written through ALIGN(w), s is read through SPAN(w): a
+ * whole block of 64 samples from the last block's start, as the zmm
+ * tier loads its blocks whole (s is best 64-byte aligned) */
 #define COMP_DEMOD_PQ_ALIGN(w) (((w) + 31) & ~31)
-#define COMP_DEMOD_PQ_SPAN(w)  (COMP_DEMOD_PQ_ALIGN(w) + COMP_DEMOD_PQ_TAPS + 1)
+#define COMP_DEMOD_PQ_SPAN(w)  (COMP_DEMOD_PQ_ALIGN(w) + 32)
+_Static_assert(COMP_DEMOD_PQ_TAPS + 1 <= 32, "demod_pq span");
 
 typedef void (*comp_demod_pq_row_fn)(int32_t *p, int32_t *q, const int16_t *s,
                                      const int16_t (*coef)[32], int w);

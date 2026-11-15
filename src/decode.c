@@ -1100,12 +1100,15 @@ static void demod_pq_row_c(int32_t *p, int32_t *q, const int16_t *s,
 DEMOD_PQ_ROW_ASM(sse4);
 DEMOD_PQ_ROW_ASM(avx2);
 DEMOD_PQ_ROW_ASM(avx512);
+DEMOD_PQ_ROW_ASM(avx512icl);
 #endif
 
 comp_demod_pq_row_fn comp_get_demod_pq_row_fn(unsigned cpu)
 {
     cpu |= COMP_CPU_BUILTIN;
 #if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512ICL)
+        return comp_demod_pq_row_avx512icl;
     if (cpu & COMP_CPU_AVX512)
         return comp_demod_pq_row_avx512;
     if (cpu & COMP_CPU_AVX2)
@@ -1325,7 +1328,7 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
                             uint16_t *outy, uint16_t *outu, uint16_t *outv)
 {
     const int w = d->width;
-    int16_t s[COMP_DEMOD_PQ_SPAN(COMP_ACTIVE_WIDTH_NTSC)];
+    DECLARE_ALIGNED( int16_t s[COMP_DEMOD_PQ_SPAN(COMP_ACTIVE_WIDTH_NTSC)], 64 );
     int32_t p_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
     int32_t q_row[COMP_DEMOD_PQ_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
 
@@ -1445,7 +1448,7 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
                                uint16_t *dstv, ptrdiff_t vstride)
 {
     const int w = d->width;
-    int16_t s[COMP_DEMOD_PQ_SPAN(COMP_ACTIVE_WIDTH_PAL)];
+    DECLARE_ALIGNED( int16_t s[COMP_DEMOD_PQ_SPAN(COMP_ACTIVE_WIDTH_PAL)], 64 );
     int16_t *est = s + COMP_DEMOD_PQ_WING;
     /* the rotated rows, read in place by the eq FIR */
     int32_t u_buf[FIR_ROW_LEN(COMP_ACTIVE_WIDTH_PAL)], v_buf[FIR_ROW_LEN(COMP_ACTIVE_WIDTH_PAL)];
