@@ -975,13 +975,14 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
 %assign cpuflags_bmi1      (1<<19) | cpuflags_avx|cpuflags_lzcnt
 %assign cpuflags_bmi2      (1<<20) | cpuflags_bmi1
 %assign cpuflags_avx2      (1<<21) | cpuflags_fma3|cpuflags_bmi2
-%assign cpuflags_avx512    (1<<22) | cpuflags_avx2 ; F, CD, BW, DQ, VL
-%assign cpuflags_avx512icl (1<<23) | cpuflags_avx512|cpuflags_gfni ; VNNI, IFMA, VBMI, VBMI2, VPOPCNTDQ, BITALG, VAES, VPCLMULQDQ
+%assign cpuflags_avxvnni   (1<<22) | cpuflags_avx2 ; VNNI in the VEX encoding
+%assign cpuflags_avx512    (1<<23) | cpuflags_avx2 ; F, CD, BW, DQ, VL
+%assign cpuflags_avx512icl (1<<24) | cpuflags_avx512|cpuflags_gfni ; VNNI, IFMA, VBMI, VBMI2, VPOPCNTDQ, BITALG, VAES, VPCLMULQDQ
 
-%assign cpuflags_cache32   (1<<24)
-%assign cpuflags_cache64   (1<<25)
-%assign cpuflags_aligned   (1<<26) ; not a cpu feature, but a function variant
-%assign cpuflags_atom      (1<<27)
+%assign cpuflags_cache32   (1<<25)
+%assign cpuflags_cache64   (1<<26)
+%assign cpuflags_aligned   (1<<27) ; not a cpu feature, but a function variant
+%assign cpuflags_atom      (1<<28)
 
 ; Returns a boolean value expressing whether or not the specified cpuflag is enabled.
 %define    cpuflag(x) (((((cpuflags & (cpuflags_ %+ x)) ^ (cpuflags_ %+ x)) - 1) >> 31) & 1)

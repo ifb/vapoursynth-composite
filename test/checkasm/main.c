@@ -18,7 +18,9 @@ static const CheckasmCpuInfo cpu_flags[] = {
     { "SSE2", "sse2", COMP_CPU_SSE2 },
     { "SSE4.1", "sse4", COMP_CPU_SSE41 },
     { "AVX2", "avx2", COMP_CPU_AVX2 },
+    { "AVX-VNNI", "avxvnni", COMP_CPU_AVXVNNI },
     { "AVX512", "avx512", COMP_CPU_AVX512 },
+    { "AVX512ICL", "avx512icl", COMP_CPU_AVX512ICL },
     {0}
 };
 
