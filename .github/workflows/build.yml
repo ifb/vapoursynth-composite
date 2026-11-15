@@ -102,9 +102,15 @@ jobs:
       env:
         CIBW_BUILD: cp314-*
         CIBW_BUILD_FRONTEND: uv
+        # The distro nasm in the manylinux/musllinux images cannot encode VEX
+        # vpdpwssd (2.16.03 cannot either), so build nasm 3.01. configure picks
+        # -std=c23, which musl's stdbool.h breaks in nasm's compiler.h.
         CIBW_BEFORE_ALL_LINUX: >-
-          (yum install -y nasm fftw-devel || dnf install -y nasm fftw-devel ||
-           apk add --no-cache nasm fftw-dev || true)
+          (yum install -y fftw-devel || dnf install -y fftw-devel ||
+           apk add --no-cache fftw-dev || true) &&
+          ( [ "$(uname -m)" != x86_64 ] || (
+          curl -fsSL https://www.nasm.us/pub/nasm/releasebuilds/3.01/nasm-3.01.tar.gz | tar xz &&
+          cd nasm-3.01 && ./configure && make -j$(nproc) nasm CFLAGS='-O2 -std=gnu17 -fwrapv -fno-common' && install -m755 nasm /usr/local/bin/nasm ) )
         CIBW_BEFORE_ALL_MACOS: brew untap aws/tap || true; brew install nasm fftw
       with:
         output-dir: dist

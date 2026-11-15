@@ -117,55 +117,93 @@ FIR_ROW_Q15
 INIT_ZMM avx512
 FIR_ROW_Q15
 
+; one tap pair at pin + %3 into the even/odd sums %1/%2
+%macro S16_PAIR 3 ; acc even, acc odd, byte disp
+    SPLATD       m6, [pinq + dcq + %3]
+%if cpuflag(avxvnni)
+    ; nasm picks the EVEX encoding unless told
+    {vex} vpdpwssd %1, m6, [pinq + %3]
+    {vex} vpdpwssd %2, m6, [pinq + %3 + 2]
+%elif cpuflag(avx)
+    pmaddwd      m4, m6, [pinq + %3]
+    pmaddwd      m5, m6, [pinq + %3 + 2]
+    paddd        %1, m4
+    paddd        %2, m5
+%else
+    ; legacy-SSE memory operands fault unless 16-byte aligned
+    movu         m4, [pinq + %3]
+    movu         m5, [pinq + %3 + 2]
+    pmaddwd      m4, m6
+    pmaddwd      m5, m6
+    paddd        %1, m4
+    paddd        %2, m5
+%endif
+%endmacro
+
 ; void fir_row_s16(int32_t *out, const int16_t *in, const int16_t *coef,
 ;                  int taps, int w)
-; Each block covers mmsize/2 outputs at x. A tap pair j, j+1 loads
-; in[x+j..] and in[x+j+1..] and interleaves them into word pairs:
-; within each 128-bit chunk c, punpcklwd holds outputs x+8c+0..3 and
-; punpckhwd x+8c+4..7, and pmaddwd against the (coef[j], coef[j+1])
-; dword sums both taps. The lo/hi sums re-interleave at the store.
+; Each block covers mmsize/2 outputs at x. pmaddwd of the words at
+; in[x+j..] against the broadcast (coef[j], coef[j+1]) sums the tap pair
+; for the even outputs x, x+2, ..., and the same product one word on,
+; at in[x+j+1..], for the odd outputs, so the samples are memory
+; operands and nothing is shuffled per tap. The even/odd sums
+; interleave at the store. The avxvnni tier folds each pmaddwd + paddd
+; into vpdpwssd.
 %macro FIR_ROW_S16 0
-cglobal fir_row_s16, 5, 9, 8, out, in, coef, taps, w, x, pin, pc, j
+cglobal fir_row_s16, 5, 9, 8, out, in, coef, taps, w, x, pin, pend, dc
     movifnidn    wd, wm
+    movsxd       tapsq, tapsd
+    inc          tapsq
+    and          tapsq, -2                ; taps rounded up to even
+    mov          dcq, coefq
+    sub          dcq, inq                 ; coef pair of the tap at pin
     xor          xq, xq
 .groups:
     pxor         m0, m0
     pxor         m1, m1
+    pxor         m2, m2
+    pxor         m3, m3
     lea          pinq, [inq + xq*2]
-    mov          pcq, coefq
-    mov          jd, tapsd
-.pair:
-    SPLATD       m6, [pcq]
-    movu         m4, [pinq]
-    movu         m5, [pinq + 2]
-    punpckhwd    m7, m4, m5
-    punpcklwd    m4, m5
-    pmaddwd      m4, m6
-    pmaddwd      m7, m6
-    paddd        m0, m4
-    paddd        m1, m7
-    add          pcq, 4
-    add          pinq, 4
-    sub          jd, 2
-    jg .pair
+    lea          pendq, [pinq + tapsq*2 - 4]
+    sub          dcq, xq
+    sub          dcq, xq
+    cmp          pinq, pendq
+    jae .last
+.pair2:
+    ; two pairs a round on separate sums: half the loop branches, and
+    ; the vpdpwssd accumulate chains (5 cycles a link) run two abreast
+    S16_PAIR     m0, m1, 0
+    S16_PAIR     m2, m3, 4
+    add          pinq, 8
+    cmp          pinq, pendq
+    jb .pair2
+    ja .sum
+.last:
+    S16_PAIR     m0, m1, 0
+.sum:
+    lea          dcq, [dcq + xq*2]
+    paddd        m0, m2
+    paddd        m1, m3
 
     paddd        m0, [d_rnd15]
     paddd        m1, [d_rnd15]
     psrad        m0, 15
     psrad        m1, 15
+    punpckhdq    m7, m0, m1
+    punpckldq    m0, m1
 %if mmsize == 16
     movu         [outq + xq*4], m0
-    movu         [outq + xq*4 + 16], m1
+    movu         [outq + xq*4 + 16], m7
 %elif mmsize == 32
-    vperm2i128   m2, m0, m1, 0x20
-    vperm2i128   m3, m0, m1, 0x31
+    vperm2i128   m2, m0, m7, 0x20
+    vperm2i128   m3, m0, m7, 0x31
     movu         [outq + xq*4], m2
     movu         [outq + xq*4 + 32], m3
 %else
     movu         m2, [q_ilv0]
     movu         m3, [q_ilv1]
-    vpermi2q     m2, m0, m1
-    vpermi2q     m3, m0, m1
+    vpermi2q     m2, m0, m7
+    vpermi2q     m3, m0, m7
     movu         [outq + xq*4], m2
     movu         [outq + xq*4 + 64], m3
 %endif
@@ -180,4 +218,6 @@ FIR_ROW_S16
 INIT_YMM avx2
 FIR_ROW_S16
 INIT_ZMM avx512
+FIR_ROW_S16
+INIT_YMM avxvnni
 FIR_ROW_S16
