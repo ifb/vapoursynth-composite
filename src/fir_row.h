@@ -31,7 +31,8 @@ comp_fir_row_q15_fn comp_get_fir_row_q15_fn(unsigned cpu);
 /* The same Q15 FIR over int16 samples and taps, accumulating in int32:
  * out[x] = (sum_j coef[j] * in[x + j] + 16384) >> 15 for 0 <= x < w.
  * Taps pair up, so coef holds taps rounded up to even with a zero pad,
- * and the caller guarantees sum|coef| * 2^15 + 2^14 < 2^31. SIMD tiers
+ * and the caller guarantees sum|coef| * max|in| + 2^14 < 2^31 (any
+ * int16 row when sum|coef| < 2^16, a bounded one otherwise). SIMD tiers
  * write out through COMP_FIR_S16_ALIGN(w) and read in through
  * COMP_FIR_S16_SPAN(w, taps), the wings and padding being the caller's
  * zeros. */

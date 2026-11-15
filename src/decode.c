@@ -63,6 +63,29 @@ static double fir_response_q15(const int16_t *taps, int n, double w)
     return sum;
 }
 
+/* The int16 form of a Q15 filter for fir_row_s16: k * 32768 comes off
+ * the center tap so the rest fit int16, and the caller adds k times the
+ * center sample back, which is exact as the removed term is a multiple
+ * of 2^15. Returns the largest sample magnitude for which the kernel's
+ * int32 sums cannot overflow, or -1 when a tap does not fit. */
+static int32_t fir_taps16(int16_t *t16, int32_t *k, const int32_t *q15, int n)
+{
+    const int c = n / 2;
+    int64_t l1 = 0;
+
+    *k = (q15[c] + 16384) >> 15;
+    for (int j = 0; j < n; j++) {
+        const int32_t r = q15[j] - (j == c ? *k * 32768 : 0);
+        if (r < -32768 || r > 32767)
+            return -1;
+        t16[j] = (int16_t)r;
+        l1 += r < 0 ? -r : r;
+    }
+    t16[n] = 0;
+    const int64_t lim = l1 ? (INT32_MAX - 16384) / l1 : 32767;
+    return (int32_t)(lim > 32767 ? 32767 : lim);
+}
+
 /* Design the chroma cascade equalizer: the inverse of the known
  * encode-filter x decode-filter chroma response, boost capped at 12 dB,
  * Hann-windowed to COMP_EQ_TAPS taps with an exactly unity cascade at
@@ -103,6 +126,7 @@ static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
     /* fir_row_q15 folds mirrored taps */
     for (int j = 0; j < COMP_EQ_TAPS; j++)
         assert(d->eq_q15[j] == d->eq_q15[COMP_EQ_TAPS - 1 - j]);
+    d->eq_lim = fir_taps16(d->eq_r16, &d->eq_k, d->eq_q15, COMP_EQ_TAPS);
 }
 
 /* the eq=2 blend's sub-nominal low end: ~600 kHz Hann-windowed sinc
@@ -130,6 +154,10 @@ static void design_narrow(comp_decode_t *d, double fs_hz)
     /* fir_row_q15 folds mirrored taps */
     for (int j = 0; j < COMP_NARROW_TAPS; j++)
         assert(d->narrow_q15[j] == d->narrow_q15[COMP_NARROW_TAPS - 1 - j]);
+    int32_t k;
+    d->narrow_lim = fir_taps16(d->narrow16, &k, d->narrow_q15, COMP_NARROW_TAPS);
+    if (k)                      /* a unity-sum low-pass has no such tap */
+        d->narrow_lim = -1;
 }
 
 /* Rows the eq and narrow FIRs read: FIR_WING zeros before the w
@@ -192,6 +220,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->cti = !!cti;
     d->pal_demod = comp_get_pal_demod_fn(comp_cpu_detect());
     d->fir_row = comp_get_fir_row_q15_fn(comp_cpu_detect());
+    d->fir_row_s16 = comp_get_fir_row_s16_fn(comp_cpu_detect());
     d->split3d_row = comp_get_split3d_row_fn(comp_cpu_detect());
     d->comb2d_row = comp_get_ntsc_comb2d_row_fn(comp_cpu_detect());
     if (eq == 2)
@@ -450,6 +479,45 @@ static void eq_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int 
     d->fir_row(out, in - COMP_EQ_TAPS / 2, d->eq_q15, COMP_EQ_TAPS, w);
 }
 
+/* An int16 copy of a demod row for fir_row_s16, between the same zero
+ * wings: FIR16_ROW_LEN(w) elements with the row FIR_WING in. Only
+ * [0, w) is ever written, so a buffer is cleared once. */
+#define FIR16_ROW_LEN(w) (FIR_WING + COMP_FIR_S16_SPAN(w, COMP_EQ_TAPS))
+
+_Static_assert(COMP_FIR_S16_ALIGN(COMP_ACTIVE_WIDTH_PAL) == COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)
+               && COMP_FIR_S16_ALIGN(COMP_ACTIVE_WIDTH_NTSC) == COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC),
+               "fir_row_s16 writes past the eq output rows");
+
+/* The eq (and, with nar set, the narrow) filter of one demod row. Real
+ * chroma stays far inside int16, where the 16-bit kernel gives the
+ * identical result at a fraction of the cost; a row that exceeds a
+ * filter's limit takes the 64-bit kernel. row16 is the scratch copy. */
+static void eq_rows(const comp_decode_t *d, const int32_t *row, int16_t *row16,
+                    int32_t *eq, int32_t *nar, int w)
+{
+    int32_t m = 0;
+    for (int x = 0; x < w; x++) {
+        const int32_t a = row[x] < 0 ? -row[x] : row[x];
+        row16[x] = (int16_t)row[x];
+        m = a > m ? a : m;
+    }
+
+    if (m <= d->eq_lim) {
+        d->fir_row_s16(eq, row16 - COMP_EQ_TAPS / 2, d->eq_r16, COMP_EQ_TAPS + 1, w);
+        for (int x = 0; x < w; x++)
+            eq[x] += d->eq_k * row[x];
+    } else {
+        eq_row(d, row, eq, w);
+    }
+    if (!nar)
+        return;
+    if (m <= d->narrow_lim)
+        d->fir_row_s16(nar, row16 - COMP_NARROW_TAPS / 2, d->narrow16,
+                       COMP_NARROW_TAPS + 1, w);
+    else
+        narrow_row(d, row, nar, w);
+}
+
 /* Luma-guided chroma transient improvement: at a coincident
  * transition, resynthesize the chroma edge from the decoded luma's
  * transition profile (normalized between its side levels), so the
@@ -652,6 +720,9 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
     int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
     fir_wings_clear(u_row, w);
     fir_wings_clear(v_row, w);
+    int16_t row16_buf[FIR16_ROW_LEN(WIDTH)];
+    int16_t *row16 = row16_buf + FIR_WING;
+    memset(row16_buf, 0, sizeof(row16_buf));
     for (int fr = 0; fr < rows; fr++) {
         const int16_t *in0 = chroma + fr * chroma_stride;
         const int16_t *in1 = fr - 1 >= 0   ? chroma + (fr - 1) * chroma_stride : zero_line;
@@ -696,18 +767,17 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
 
         int32_t *u_out = u_row, *v_out = v_row;
         if (d->eq) {
-            eq_row(d, u_row, u_eq, w);
-            eq_row(d, v_row, v_eq, w);
-            if (d->eq == 2 && conf) {
-                /* the confidence steers total chroma bandwidth: the
-                 * blend runs from a sub-nominal low-pass (marginal or
-                 * absent pairs: residual leak narrowed away) up to the
-                 * boosted cascade inverse (symmetric pairs, ~0.94 mean
-                 * ratio; leak measures 0.3-0.8, and the fourth power
-                 * widens the gap). */
-                int32_t u_nar[COMP_FIR_ROW_ALIGN(WIDTH)], v_nar[COMP_FIR_ROW_ALIGN(WIDTH)];
-                narrow_row(d, u_row, u_nar, w);
-                narrow_row(d, v_row, v_nar, w);
+            /* the confidence steers total chroma bandwidth: the
+             * blend runs from a sub-nominal low-pass (marginal or
+             * absent pairs: residual leak narrowed away) up to the
+             * boosted cascade inverse (symmetric pairs, ~0.94 mean
+             * ratio; leak measures 0.3-0.8, and the fourth power
+             * widens the gap). */
+            int32_t u_nar[COMP_FIR_ROW_ALIGN(WIDTH)], v_nar[COMP_FIR_ROW_ALIGN(WIDTH)];
+            const int blend = d->eq == 2 && conf;
+            eq_rows(d, u_row, row16, u_eq, blend ? u_nar : NULL, w);
+            eq_rows(d, v_row, row16, v_eq, blend ? v_nar : NULL, w);
+            if (blend) {
                 const float *cw = conf + fr * chroma_stride;
                 for (int x = 0; x < w; x++) {
                     const float c2 = cw[x] * cw[x];
@@ -1297,15 +1367,17 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
 
     int32_t *u_out = u_row, *v_out = v_row;
     if (d->eq) {
-        eq_row(d, u_row, u_eq, w);
-        eq_row(d, v_row, v_eq, w);
-        if (d->eq == 2 && conf) {
-            /* the PAL blend: confidence steers bandwidth from the
-             * sub-nominal low-pass up to the boosted cascade inverse */
-            int32_t u_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
-            int32_t v_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
-            narrow_row(d, u_row, u_nar, w);
-            narrow_row(d, v_row, v_nar, w);
+        /* the PAL blend: confidence steers bandwidth from the
+         * sub-nominal low-pass up to the boosted cascade inverse */
+        int32_t u_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+        int32_t v_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+        int16_t row16_buf[FIR16_ROW_LEN(COMP_ACTIVE_WIDTH_NTSC)];
+        int16_t *row16 = row16_buf + FIR_WING;
+        const int blend = d->eq == 2 && conf;
+        memset(row16_buf, 0, sizeof(row16_buf));
+        eq_rows(d, u_row, row16, u_eq, blend ? u_nar : NULL, w);
+        eq_rows(d, v_row, row16, v_eq, blend ? v_nar : NULL, w);
+        if (blend) {
             if (acc) {
                 uint16_t *om = acc->out_mask
                     ? acc->out_mask + out_row * acc->mask_stride : NULL;
@@ -1360,6 +1432,9 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
     int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
 
     memset(s, 0, sizeof(s));
+    int16_t row16_buf[FIR16_ROW_LEN(COMP_ACTIVE_WIDTH_PAL)];
+    int16_t *row16 = row16_buf + FIR_WING;
+    memset(row16_buf, 0, sizeof(row16_buf));
     /* aligned for the same reason as the PAL demod's rows */
     DECLARE_ALIGNED( int16_t pq_coef[COMP_DEMOD_PQ_PAIRS][32], 64 );
     memcpy(pq_coef, d->demod_pq_coef, sizeof(pq_coef));
@@ -1401,8 +1476,8 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
 
         const int32_t *u_out = u_row, *v_out = v_row;
         if (use_eq && d->eq) {
-            eq_row(d, u_row, u_eq, w);
-            eq_row(d, v_row, v_eq, w);
+            eq_rows(d, u_row, row16, u_eq, NULL, w);
+            eq_rows(d, v_row, row16, v_eq, NULL, w);
             u_out = u_eq;
             v_out = v_eq;
         }
