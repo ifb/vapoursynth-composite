@@ -335,8 +335,8 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
             }
         }
         if (refine > 0) {
-            /* Y estimate, recomposite, crude Y, crude chroma */
-            d->scratch[i].refine = malloc(sizeof(uint16_t) * d->width * d->height * 4);
+            /* Y estimate, recomposite, crude Y */
+            d->scratch[i].refine = malloc(sizeof(uint16_t) * d->width * d->height * 3);
             if (!d->scratch[i].refine) {
                 comp_decode_free(d);
                 return -1;
@@ -1333,7 +1333,8 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
 
 /* Crude 1D notch decode (a classic cheap decoder, and the degradation
  * model of the refine loop): bandpass chroma estimate, product demod
- * with the color low-pass, luma = composite minus the estimate. */
+ * with the color low-pass, luma = composite minus the estimate. With
+ * dstu NULL only luma is decoded. */
 static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
                                int row_off, int use_eq,
                                const uint16_t *comp, ptrdiff_t comp_stride,
@@ -1364,22 +1365,26 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
         for (int x = 2; x < w - 2; x++)
             est[x] = (int16_t)((2 * (int32_t)line[x] - line[x - 2] - line[x + 2]) / 4);
 
+        int32_t yl_row[COMP_ACTIVE_WIDTH_PAL];
+        for (int x = 0; x < w; x++)
+            yl_row[x] = (int32_t)line[x] - est[x] - d->level_black;
+        d->demod_quant_row(dsty + r * ystride, yl_row, &d->mag_y, w);
+        if (!dstu)
+            continue;
+
         const comp_sc_line_t sc = comp_sc_line(d->standard, frame, r + row_off);
         const int32_t sn0 = d->sin_q15[sc.phase];
         const int32_t cs0 = d->sin_q15[(sc.phase + d->den / 4) % d->den];
 
         d->demod_pq_row(p_row, q_row, s, d->demod_pq_coef, w);
 
-        int32_t yl_row[COMP_ACTIVE_WIDTH_PAL];
         for (int x = 0; x < w; x++) {
             const int32_t p0 = p_row[x];
             const int32_t q0 = q_row[x];
             u_row[x] = (int32_t)(((int64_t)p0 * cs0 + (int64_t)q0 * sn0 + 8192) >> 14);
             v_row[x] = sc.vswitch *
                 (int32_t)(((int64_t)q0 * cs0 - (int64_t)p0 * sn0 + 8192) >> 14);
-            yl_row[x] = (int32_t)line[x] - est[x] - d->level_black;
         }
-        d->demod_quant_row(dsty + r * ystride, yl_row, &d->mag_y, w);
 
         const int32_t *u_out = u_row, *v_out = v_row;
         if (use_eq && d->eq) {
@@ -1470,7 +1475,7 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
                              est + r * w, dstu + r * ustride, dstv + r * vstride,
                              comp_sc_line(d->standard, frame, r + row_off));
         crude_decode_frame(d, frame, rows, row_off, 0, comp2, w,
-                           cru, w, cru + plane, w, cru + plane, w);
+                           cru, w, NULL, 0, NULL, 0);
         for (int r = 0; r < rows; r++) {
             const uint16_t *oy = orig_y + r * orig_stride;
             uint16_t *ey = est + r * w;
