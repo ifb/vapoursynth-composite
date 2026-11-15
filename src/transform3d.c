@@ -397,6 +397,7 @@ static float apply_filter_lut(const comp_transform3d_t *t,
     float e_num[COMP_T3D_NTHRESH], e_den[COMP_T3D_NTHRESH];
     float conf_num = 0.0f, conf_den = 0.0f;
 
+    /* 0 when the caller keeps the tile's unwritten floats zero itself */
     memset(out, 0, sizeof(float) * out_floats);
 
     t->t3d_mag(m_in, m_ref, in, rows, nrows);
@@ -881,6 +882,13 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
         ph |= (unsigned)((tz + z + parity) & 1) << z;
 
     memset(s->chroma, 0, sizeof(float) * ZTILE * plane);
+    /* The filter writes every valid column of every band row on each
+     * tile (t3d_apply's own and reflected bands cover them between
+     * them), and the in-place inverse passes combine a column only
+     * with itself, so the rows' zero padding stays zero once cleared:
+     * one clear serves the whole slab. */
+    if (use_fft)
+        memset(&cplx_out, 0, sizeof(cplx_out));
 
     for (int tile_y = -YTILE / 2; tile_y < frame_lines; tile_y += YTILE / 2) {
         const int start_y = tile_y < 0 ? -tile_y : 0;
@@ -925,8 +933,7 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
             if (use_fft) {
                 t->fft_fwd(cplx_in.band, real, t->fft_black, ph);
                 w = apply_filter_lut(t, cplx_in.band, cplx_out.band,
-                                     t->rowpair_fft, t->special_fft,
-                                     ZTILE * YTILE * COMP_FFT_ROWSTRIDE);
+                                     t->rowpair_fft, t->special_fft, 0);
                 t->fft_inv(real, cplx_out.band, ph);
             } else {
                 fftwf_execute_dft_r2c(t->forward, real, cplx_in.cplx);
@@ -975,6 +982,9 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
     const size_t plane = (size_t)field_rows * width;
 
     memset(s->chroma, 0, sizeof(float) * ZTILE * plane);
+    /* as in build_slab_ntsc: the band rows' padding stays zero */
+    if (use_fft)
+        memset(&cplx_out, 0, sizeof(cplx_out));
 
     for (int tile_r = -YTILE_PAL / 2; tile_r < field_rows + SHIFT_MAX;
          tile_r += YTILE_PAL / 2) {
@@ -1012,8 +1022,7 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
             if (use_fft) {
                 t->fft_fwd(cplx_in.band, real, NULL, 0);
                 w = apply_filter_lut(t, cplx_in.band, cplx_out.band,
-                                     t->rowpair_fft, t->special_fft,
-                                     ZTILE * YTILE_PAL * COMP_FFT_ROWSTRIDE);
+                                     t->rowpair_fft, t->special_fft, 0);
                 t->fft_inv(real, cplx_out.band, 0);
             } else {
                 fftwf_execute_dft_r2c(t->forward, real, cplx_in.cplx);
