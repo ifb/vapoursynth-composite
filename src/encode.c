@@ -166,8 +166,8 @@ void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
         us[k + lo] = (int16_t)(srcu[k] - 32768);
         vs[k + lo] = (int16_t)(srcv[k] - 32768);
     }
-    e->fir_row(uf, us, e->uv_taps16, ntaps, w);
-    e->fir_row(vf, vs, e->uv_taps16, ntaps, w);
+    e->fir_row(uf, us, e->uv_taps16, ntaps, w, 0);
+    e->fir_row(vf, vs, e->uv_taps16, ntaps, w, 0);
 
     /* at 4xfsc the carrier advances exactly 90 degrees per sample, so a
      * line needs only its start-phase sine and cosine, cycled through a

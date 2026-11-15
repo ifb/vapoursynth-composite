@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <checkasm/checkasm.h>
@@ -16,9 +17,11 @@ static CHECKASM_ALIGN(int32_t in_buf[INLEN]);
 static CHECKASM_ALIGN(int32_t coef_buf[MAXTAPS]);
 static CHECKASM_ALIGN(int32_t out_c[COMP_FIR_S16_ALIGN(MAXW)]);
 static CHECKASM_ALIGN(int32_t out_a[COMP_FIR_S16_ALIGN(MAXW)]);
-#define INLEN16 COMP_FIR_S16_SPAN(MAXW, COMP_UV_MAXTAPS)
+/* the eq's int16 taps are the longest fir_row_s16 filter */
+_Static_assert(COMP_UV_MAXTAPS <= COMP_EQ_TAPS, "fir_row_s16 test buffers");
+#define INLEN16 COMP_FIR_S16_SPAN(MAXW, COMP_EQ_TAPS)
 static CHECKASM_ALIGN(int16_t in16[INLEN16]);
-static CHECKASM_ALIGN(int16_t coef16[COMP_UV_MAXTAPS + 1]);
+static CHECKASM_ALIGN(int16_t coef16[COMP_EQ_TAPS + 1]);
 
 /* the production widths plus ragged and tiny ones */
 static const int widths[] = { 1, 7, 8, 16, 100, 501, 754, 758, 928 };
@@ -66,10 +69,19 @@ void checkasm_test_fir_row(void)
     check_fir_row_s16();
 }
 
+/* the wide mode's contract value, computed in 64 bits */
+static int32_t fir_s16_exact(const int16_t *in, const int16_t *coef, int taps)
+{
+    int64_t acc = 0;
+    for (int j = 0; j < taps; j++)
+        acc += (int64_t)coef[j] * in[j];
+    return (int32_t)((acc + 16384) >> 15);
+}
+
 static void check_fir_row_s16(void)
 {
     checkasm_declare(void, int32_t *, const int16_t *, const int16_t *,
-                     int, int);
+                     int, int, int);
     if (checkasm_check_func(comp_get_fir_row_s16_fn(checkasm_get_cpu_flags()),
                             "fir_row_s16")) {
         /* the encoders' own taps, then random ones within the contract
@@ -94,13 +106,55 @@ static void check_fir_row_s16(void)
                                 : mode == 1 ? 32767 : -32768;
                     memset(out_c, 0xaa, sizeof(out_c));
                     memset(out_a, 0x55, sizeof(out_a));
-                    checkasm_call_ref(out_c, in16, coef16, taps, widths[i]);
-                    checkasm_call_new(out_a, in16, coef16, taps, widths[i]);
+                    checkasm_call_ref(out_c, in16, coef16, taps, widths[i], 0);
+                    checkasm_call_new(out_a, in16, coef16, taps, widths[i], 0);
                     checkasm_check1d(int32_t, out_c, out_a, widths[i], "out");
                 }
             }
         }
-        checkasm_bench_new(out_a, in16, enc[0].uv_taps16, enc[0].uv_ntaps, MAXW);
+
+        /* wide mode on the decoders' eq taps at the wide limit, where
+         * the whole sum passes int32 and each alternating-pair half
+         * still fits: random rows, both signs at the limit, and every
+         * word carrying the sign of the tap over it at one position */
+        for (int std = 0; std < 2; std++) {
+            comp_decode_t *d = calloc(1, sizeof(*d));
+            const int standard = std ? COMP_STD_NTSC : COMP_STD_PAL;
+            if (!d || comp_decode_init(d, standard, 0.5, 1, 0, 3, 1, 0,
+                                       std ? 1 : 0, 0, 0.0, 0)) {
+                free(d);
+                checkasm_fail_func("decoder init");
+                return;
+            }
+            const int taps = COMP_EQ_TAPS + 1;
+            const int32_t lim = d->eq_lim_wide;
+            memcpy(coef16, d->eq_r16, sizeof(coef16[0]) * taps);
+            for (int mode = 0; mode < 4; mode++) {
+                for (int i = 0; i < NWIDTHS; i++) {
+                    for (int k = 0; k < INLEN16; k++) {
+                        const int neg = coef16[k % taps] < 0;
+                        in16[k] = (int16_t)(mode == 0 ? (int32_t)(checkasm_rand() % (2 * lim + 1)) - lim
+                                          : mode == 1 ? (checkasm_rand() & 1 ? lim : -lim)
+                                          : mode == 2 ? (neg ? -lim : lim)
+                                          : (neg ? lim : -lim));
+                    }
+                    memset(out_c, 0xaa, sizeof(out_c));
+                    memset(out_a, 0x55, sizeof(out_a));
+                    checkasm_call_ref(out_c, in16, coef16, taps, widths[i], 1);
+                    checkasm_call_new(out_a, in16, coef16, taps, widths[i], 1);
+                    checkasm_check1d(int32_t, out_c, out_a, widths[i], "out");
+                    for (int x = 0; x < widths[i]; x++) {
+                        if (out_c[x] != fir_s16_exact(in16 + x, coef16, taps)) {
+                            checkasm_fail_func("wide reference at x = %d", x);
+                            break;
+                        }
+                    }
+                }
+            }
+            comp_decode_free(d);
+            free(d);
+        }
+        checkasm_bench_new(out_a, in16, enc[0].uv_taps16, enc[0].uv_ntaps, MAXW, 0);
     }
     checkasm_report("fir_row_s16");
 }

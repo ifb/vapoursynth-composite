@@ -67,22 +67,34 @@ static double fir_response_q15(const int16_t *taps, int n, double w)
  * the center tap so the rest fit int16, and the caller adds k times the
  * center sample back, which is exact as the removed term is a multiple
  * of 2^15. Returns the largest sample magnitude for which the kernel's
- * int32 sums cannot overflow, or -1 when a tap does not fit. */
-static int32_t fir_taps16(int16_t *t16, int32_t *k, const int32_t *q15, int n)
+ * int32 sum cannot overflow, and in *wide the same for its wide mode,
+ * where the alternating tap pairs' two sums each have to fit; -1 when
+ * a tap does not fit int16. */
+static int32_t fir_taps16(int16_t *t16, int32_t *k, int32_t *wide,
+                          const int32_t *q15, int n)
 {
     const int c = n / 2;
-    int64_t l1 = 0;
+    int64_t l1[2] = { 0, 0 };
 
     *k = (q15[c] + 16384) >> 15;
+    *wide = -1;
     for (int j = 0; j < n; j++) {
         const int32_t r = q15[j] - (j == c ? *k * 32768 : 0);
         if (r < -32768 || r > 32767)
             return -1;
         t16[j] = (int16_t)r;
-        l1 += r < 0 ? -r : r;
+        l1[(j / 2) & 1] += r < 0 ? -r : r;
     }
     t16[n] = 0;
-    const int64_t lim = l1 ? (INT32_MAX - 16384) / l1 : 32767;
+    const int64_t sum = l1[0] + l1[1];
+    const int64_t half = l1[0] > l1[1] ? l1[0] : l1[1];
+    if (!sum)
+        return *wide = 32767;
+    int64_t lim = (INT32_MAX - 16384) / sum;
+    int64_t wlim = INT32_MAX / half;
+    if (wlim > (UINT32_MAX - 16384) / sum)
+        wlim = (UINT32_MAX - 16384) / sum;
+    *wide = (int32_t)(wlim > 32767 ? 32767 : wlim);
     return (int32_t)(lim > 32767 ? 32767 : lim);
 }
 
@@ -126,7 +138,8 @@ static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
     /* fir_row_q15 folds mirrored taps */
     for (int j = 0; j < COMP_EQ_TAPS; j++)
         assert(d->eq_q15[j] == d->eq_q15[COMP_EQ_TAPS - 1 - j]);
-    d->eq_lim = fir_taps16(d->eq_r16, &d->eq_k, d->eq_q15, COMP_EQ_TAPS);
+    d->eq_lim = fir_taps16(d->eq_r16, &d->eq_k, &d->eq_lim_wide, d->eq_q15,
+                           COMP_EQ_TAPS);
 }
 
 /* the eq=2 blend's sub-nominal low end: ~600 kHz Hann-windowed sinc
@@ -154,8 +167,9 @@ static void design_narrow(comp_decode_t *d, double fs_hz)
     /* fir_row_q15 folds mirrored taps */
     for (int j = 0; j < COMP_NARROW_TAPS; j++)
         assert(d->narrow_q15[j] == d->narrow_q15[COMP_NARROW_TAPS - 1 - j]);
-    int32_t k;
-    d->narrow_lim = fir_taps16(d->narrow16, &k, d->narrow_q15, COMP_NARROW_TAPS);
+    int32_t k, wide;
+    d->narrow_lim = fir_taps16(d->narrow16, &k, &wide, d->narrow_q15,
+                               COMP_NARROW_TAPS);
     if (k)                      /* a unity-sum low-pass has no such tap */
         d->narrow_lim = -1;
 }
@@ -491,7 +505,7 @@ _Static_assert(COMP_FIR_S16_ALIGN(COMP_ACTIVE_WIDTH_PAL) == COMP_FIR_ROW_ALIGN(C
 /* The eq (and, with nar set, the narrow) filter of one demod row. Real
  * chroma stays far inside int16, where the 16-bit kernel gives the
  * identical result at a fraction of the cost; a row that exceeds a
- * filter's limit takes the 64-bit kernel. row16 is the scratch copy. */
+ * filter's limits takes the 64-bit kernel. row16 is the scratch copy. */
 static void eq_rows(const comp_decode_t *d, const int32_t *row, int16_t *row16,
                     int32_t *eq, int32_t *nar, int w)
 {
@@ -502,8 +516,9 @@ static void eq_rows(const comp_decode_t *d, const int32_t *row, int16_t *row16,
         m = a > m ? a : m;
     }
 
-    if (m <= d->eq_lim) {
-        d->fir_row_s16(eq, row16 - COMP_EQ_TAPS / 2, d->eq_r16, COMP_EQ_TAPS + 1, w);
+    if (m <= d->eq_lim_wide) {
+        d->fir_row_s16(eq, row16 - COMP_EQ_TAPS / 2, d->eq_r16, COMP_EQ_TAPS + 1,
+                       w, m > d->eq_lim);
         for (int x = 0; x < w; x++)
             eq[x] += d->eq_k * row[x];
     } else {
@@ -513,7 +528,7 @@ static void eq_rows(const comp_decode_t *d, const int32_t *row, int16_t *row16,
         return;
     if (m <= d->narrow_lim)
         d->fir_row_s16(nar, row16 - COMP_NARROW_TAPS / 2, d->narrow16,
-                       COMP_NARROW_TAPS + 1, w);
+                       COMP_NARROW_TAPS + 1, w, 0);
     else
         narrow_row(d, row, nar, w);
 }

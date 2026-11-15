@@ -13,6 +13,8 @@ SECTION_RODATA 64
 q_bias15: times 8 dq (1 << 45) + 16384
 d_sub30:  times 16 dd 1 << 30
 d_rnd15:  times 16 dd 16384
+d_rnd14:  times 16 dd 8192
+d_one:    times 16 dd 1
 ; qword gathers re-interleaving the lo/hi unpack halves of four chunks
 q_ilv0:   dq 0, 1, 8, 9, 2, 3, 10, 11
 q_ilv1:   dq 4, 5, 12, 13, 6, 7, 14, 15
@@ -149,8 +151,25 @@ FIR_ROW_Q15
 ; operands and nothing is shuffled per tap. The even/odd sums
 ; interleave at the store. The avxvnni tier folds each pmaddwd + paddd
 ; into vpdpwssd.
+;
+; The pairs alternate between two sums a and b. With wide set the two
+; are joined without forming a + b, which may not fit int32:
+; (a + b + 16384) >> 15 = ((a >> 1) + (b >> 1) + (a & b & 1) + 8192) >> 14,
+; the first three terms being floor((a + b) / 2) and the dropped low
+; bit of a + b too small to carry.
+%macro S16_JOIN 3 ; a (out), b, scratch
+    pand         %3, %1, %2
+    pand         %3, [d_one]
+    psrad        %1, 1
+    psrad        %2, 1
+    paddd        %1, %2
+    paddd        %1, %3
+    paddd        %1, [d_rnd14]
+    psrad        %1, 14
+%endmacro
+
 %macro FIR_ROW_S16 0
-cglobal fir_row_s16, 5, 9, 8, out, in, coef, taps, w, x, pin, pend, dc
+cglobal fir_row_s16, 6, 10, 8, out, in, coef, taps, w, wide, x, pin, pend, dc
     movifnidn    wd, wm
     movsxd       tapsq, tapsd
     inc          tapsq
@@ -182,13 +201,15 @@ cglobal fir_row_s16, 5, 9, 8, out, in, coef, taps, w, x, pin, pend, dc
     S16_PAIR     m0, m1, 0
 .sum:
     lea          dcq, [dcq + xq*2]
+    test         wided, wided
+    jnz .join
     paddd        m0, m2
     paddd        m1, m3
-
     paddd        m0, [d_rnd15]
     paddd        m1, [d_rnd15]
     psrad        m0, 15
     psrad        m1, 15
+.store:
     punpckhdq    m7, m0, m1
     punpckldq    m0, m1
 %if mmsize == 16
@@ -211,6 +232,10 @@ cglobal fir_row_s16, 5, 9, 8, out, in, coef, taps, w, x, pin, pend, dc
     cmp          xd, wd
     jl .groups
     RET
+.join:
+    S16_JOIN     m0, m2, m4
+    S16_JOIN     m1, m3, m5
+    jmp .store
 %endmacro
 
 INIT_XMM sse4

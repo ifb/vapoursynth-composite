@@ -236,11 +236,12 @@ struct comp_decode_t {
     /* the same filters for fir_row_s16, used on rows whose samples stay
      * within the limit that keeps its int32 sums exact: eq with
      * eq_k * 32768 taken off the center tap (added back as eq_k times
-     * the sample), both zero-padded to an even count. A negative limit
-     * means the taps do not fit int16. */
+     * the sample), both zero-padded to an even count. eq_lim_wide is
+     * the limit of the kernel's wide mode. A negative limit means the
+     * taps do not fit int16. */
     int16_t eq_r16[COMP_EQ_TAPS + 1];
     int16_t narrow16[COMP_NARROW_TAPS + 1];
-    int32_t eq_k, eq_lim, narrow_lim;
+    int32_t eq_k, eq_lim, eq_lim_wide, narrow_lim;
     int16_t sin_q15[COMP_SC_DEN_PAL];
     int16_t pal_demod_coef[COMP_PAL_DEMOD_ROWS][32];
     comp_pal_demod_fn pal_demod;
