@@ -27,6 +27,7 @@
 #include "cpu.h"
 #include "decode.h"
 #include "encode.h"
+#include "osdep.h"
 
 /* This file is compiled with -ffp-contract=off (see meson.build): the
  * float separation heuristics feed discrete choices -- ntsc_comb2d's
@@ -637,6 +638,12 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
     int16_t pr[4][2 * PR_STRIDE];
 
     memset(pr, 0, sizeof(pr));
+    /* The decoder is heap-allocated at no particular offset, and at
+     * half of them every 32-byte load of a coefficient row crosses a
+     * cache line: 60 split loads per kernel iteration. An aligned copy
+     * takes the allocator out of it. */
+    DECLARE_ALIGNED( int16_t coef[COMP_PAL_DEMOD_ROWS][32], 64 );
+    memcpy(coef, d->pal_demod_coef, sizeof(coef));
     /* the demod rows, read in place by the eq and narrow FIRs; the
      * demod writes through its alignment, which must not reach the
      * zeros past w */
@@ -678,7 +685,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         uint16_t *outv = dstv + row * vstride;
         int32_t u_eq[COMP_FIR_ROW_ALIGN(WIDTH)], v_eq[COMP_FIR_ROW_ALIGN(WIDTH)];
 
-        d->pal_demod(u_row, v_row, &pr[0][0], PR_STRIDE, d->pal_demod_coef,
+        d->pal_demod(u_row, v_row, &pr[0][0], PR_STRIDE, (const int16_t (*)[32])coef,
                      w, bp, bq, sc.vswitch);
 
         /* luma is the composite minus the separated chroma */
@@ -1250,7 +1257,10 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     fir_wings_clear(u_row, w);
     fir_wings_clear(v_row, w);
 
-    d->demod_pq_row(p_row, q_row, s, d->demod_pq_coef, w);
+    /* aligned for the same reason as the PAL demod's rows */
+    DECLARE_ALIGNED( int16_t pq_coef[COMP_DEMOD_PQ_PAIRS][32], 64 );
+    memcpy(pq_coef, d->demod_pq_coef, sizeof(pq_coef));
+    d->demod_pq_row(p_row, q_row, s, (const int16_t (*)[32])pq_coef, w);
 
     d->demod_rotate_row(u_row, v_row, p_row, q_row, bpq, w);
 
@@ -1350,6 +1360,9 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
     int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
 
     memset(s, 0, sizeof(s));
+    /* aligned for the same reason as the PAL demod's rows */
+    DECLARE_ALIGNED( int16_t pq_coef[COMP_DEMOD_PQ_PAIRS][32], 64 );
+    memcpy(pq_coef, d->demod_pq_coef, sizeof(pq_coef));
     fir_wings_clear(u_row, w);
     fir_wings_clear(v_row, w);
     for (int r = 0; r < rows; r++) {
@@ -1376,7 +1389,7 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
         const int32_t sn0 = d->sin_q15[sc.phase];
         const int32_t cs0 = d->sin_q15[(sc.phase + d->den / 4) % d->den];
 
-        d->demod_pq_row(p_row, q_row, s, d->demod_pq_coef, w);
+        d->demod_pq_row(p_row, q_row, s, (const int16_t (*)[32])pq_coef, w);
 
         for (int x = 0; x < w; x++) {
             const int32_t p0 = p_row[x];
