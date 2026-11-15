@@ -20,7 +20,8 @@
  * loop of the PALcolour-style demodulator). pr holds four planes of
  * `stride` int16 word pairs, the vertical tap groups (line, 0),
  * (-2, +2), (-1, +1) and (-3, +3) field lines, with x = 0 at pair
- * COMP_DECODE_FILTER_SIZE and that many zero pairs each side. The
+ * COMP_PAL_DEMOD_PAD and COMP_DECODE_FILTER_SIZE zero pairs each side
+ * of the row. The
  * chroma-times-carrier products are zero on alternate samples, so each
  * tap feeds the sine or the cosine sums by the parity of its position,
  * and the carrier and vertical signs fold into per-phase coefficient
@@ -30,9 +31,12 @@
  * [-32767, 32768]: the SIMD rotation multiplies their negations as
  * int16), vswitch the PAL switch sign. Writes u, v through
  * COMP_PAL_DEMOD_ALIGN(w) and reads pr through that plus
- * 2 * COMP_DECODE_FILTER_SIZE pairs. */
+ * 2 * COMP_PAL_DEMOD_PAD pairs: the padding is a whole zmm vector of
+ * pairs each side, so a tier can load a plane in aligned vectors (the
+ * planes are best 64-byte aligned, with a stride that keeps them so). */
 #define COMP_PAL_DEMOD_ROWS (4 + 8 * COMP_DECODE_FILTER_SIZE)
 #define COMP_PAL_DEMOD_ALIGN(w) (((w) + 15) & ~15)
+#define COMP_PAL_DEMOD_PAD 16
 
 typedef void (*comp_pal_demod_fn)(int32_t *u, int32_t *v, const int16_t *pr,
                                   ptrdiff_t stride, const int16_t (*coef)[32],

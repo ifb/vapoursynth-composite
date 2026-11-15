@@ -644,7 +644,8 @@ static void pal_demod_row_c(int32_t *u, int32_t *v, const int16_t *pr,
             for (int side = 0; side < (b ? 2 : 1); side++) {
                 for (int k = 0; k < 4; k++) {
                     const int16_t *c = coef[PAL_ROW(b, side, k)];
-                    const int16_t *pk = pr + 2 * (k * stride + FS + x0 + (side ? -b : b));
+                    const int16_t *pk = pr + 2 * (k * stride + COMP_PAL_DEMOD_PAD + x0
+                                                  + (side ? -b : b));
                     int32_t *a = acc[k >= 2][b & 1];
                     for (int x = 0; x < n; x += 4)
                         for (int l = 0; l < 4; l++)
@@ -714,11 +715,12 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
     const int rows = d->height / 2;
 
     /* the vertical tap groups as word pairs of the chroma lines:
-     * (line, 0), (-2, +2), (-1, +1), (-3, +3) field lines. FS zero
-     * pairs each side give the filter its reach without bounds checks;
-     * only [FS, FS + w) is rewritten per row. */
-    enum { PR_STRIDE = COMP_PAL_DEMOD_ALIGN(WIDTH) + 2 * FS };
-    int16_t pr[4][2 * PR_STRIDE];
+     * (line, 0), (-2, +2), (-1, +1), (-3, +3) field lines. The zero
+     * padding each side gives the filter its reach without bounds
+     * checks; only [PAD, PAD + w) is rewritten per row. */
+    enum { PR_STRIDE = COMP_PAL_DEMOD_ALIGN(WIDTH) + 2 * COMP_PAL_DEMOD_PAD };
+    DECLARE_ALIGNED( int16_t pr[4][2 * PR_STRIDE], 64 );
+    _Static_assert(PR_STRIDE % 16 == 0, "PAL demod planes lose their alignment");
 
     memset(pr, 0, sizeof(pr));
     /* The decoder is heap-allocated at no particular offset, and at
@@ -748,7 +750,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         const int16_t *in6 = fr + 3 < rows ? chroma + (fr + 3) * chroma_stride : zero_line;
 
         for (int x = 0; x < w; x++) {
-            const int i = 2 * (FS + x);
+            const int i = 2 * (COMP_PAL_DEMOD_PAD + x);
             pr[0][i] = in0[x];
             pr[1][i] = in3[x];
             pr[1][i + 1] = in4[x];

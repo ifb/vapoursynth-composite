@@ -15,30 +15,63 @@ d_m8192:   times 16 dd -8192
 SECTION .text
 
 %define FS 7
+; x = 0 sits at pair PAD of each plane (COMP_PAL_DEMOD_PAD)
+%define PAD 16
 
-; one pair plane at one tap position: the word pairs at x + disp dot the
-; row's per-phase (lo, hi) coefficients into the dword sums of acc
-%macro TERM 4 ; acc, plane, byte disp, coefficient row
-    movu         m4, [%2 + xq*4 + %3]
-%if cpuflag(avx)
-    pmaddwd      m4, [cfq + (%4)*64]
+; one pair plane at one tap position: the word pairs at x + b dot the
+; row's per-phase (lo, hi) coefficients into the dword sums of acc.
+;
+; A zmm load of the pairs at x + b crosses a cache line for every b but
+; 0, so the zmm tier instead takes each plane's three aligned vectors at
+; x - 16, x and x + 16 (m16.. by plane, see PLANE_LOAD) and shifts the
+; pairs it needs out of two of them with valignd.
+%macro TERM 5 ; acc, plane pointer, plane index, b, coefficient row
+%if mmsize == 64
+    %assign %%lo 16 + (%3)*3
+    %assign %%mid %%lo + 1
+    %assign %%hi %%lo + 2
+  %if %4 == 0
+    pmaddwd      m4, m %+ %%mid, [cfq + (%5)*64]
+  %elif %4 > 0
+    valignd      m4, m %+ %%hi, m %+ %%mid, %4
+    pmaddwd      m4, [cfq + (%5)*64]
+  %else
+    valignd      m4, m %+ %%mid, m %+ %%lo, 16 + (%4)
+    pmaddwd      m4, [cfq + (%5)*64]
+  %endif
     paddd        %1, m4
 %else
+    movu         m4, [%2 + xq*4 + (PAD + (%4))*4]
+  %if cpuflag(avx)
+    pmaddwd      m4, [cfq + (%5)*64]
+    paddd        %1, m4
+  %else
     ; legacy-SSE memory operands fault unless 16-byte aligned, and the
     ; table lives in a malloc'd decoder at no particular offset
-    movu         m5, [cfq + (%4)*64]
+    movu         m5, [cfq + (%5)*64]
     pmaddwd      m4, m5
     paddd        %1, m4
+  %endif
 %endif
 %endmacro
 
-; all four planes at tap position FS + %1 (coefficient rows from %2)
+; the zmm tier's three vectors of one plane: pairs x - 16, x, x + 16
+%macro PLANE_LOAD 2 ; plane pointer, plane index
+    %assign %%lo 16 + (%2)*3
+    %assign %%mid %%lo + 1
+    %assign %%hi %%lo + 2
+    movu         m %+ %%lo,  [%1 + xq*4 + (PAD - 16)*4]
+    movu         m %+ %%mid, [%1 + xq*4 + PAD*4]
+    movu         m %+ %%hi,  [%1 + xq*4 + (PAD + 16)*4]
+%endmacro
+
+; all four planes at tap position x + %1 (coefficient rows from %2)
 ; into the c0/c1 sums %3 and the c2/c3 sums %4
-%macro PLANES 4 ; offset, first row, acc c0/c1, acc c2/c3
-    TERM         %3, prq, (FS + %1)*4, %2
-    TERM         %3, p1q, (FS + %1)*4, %2 + 1
-    TERM         %4, p2q, (FS + %1)*4, %2 + 2
-    TERM         %4, p3q, (FS + %1)*4, %2 + 3
+%macro PLANES 4 ; b, first row, acc c0/c1, acc c2/c3
+    TERM         %3, prq, 0, %1, %2
+    TERM         %3, p1q, 1, %1, %2 + 1
+    TERM         %4, p2q, 2, %1, %2 + 2
+    TERM         %4, p3q, 3, %1, %2 + 3
 %endmacro
 
 ; void pal_demod_row(int32_t *u, int32_t *v, const int16_t *pr,
@@ -58,7 +91,8 @@ SECTION .text
 ; with -pv = (-(a_sn - b_cs) + 32767) >> 16, the exact negation of the
 ; rounded shift.
 %macro PAL_DEMOD_ROW 0
-cglobal pal_demod_row, 6, 11, 13, u, v, pr, stride, cf, w, p1, p2, p3, x, t
+cglobal pal_demod_row, 6, 11, 13 + 15*(mmsize/64), u, v, pr, stride, cf, w, \
+                                                    p1, p2, p3, x, t
     lea          tq, [strideq*4]
     lea          p1q, [prq + tq]
     lea          p2q, [prq + tq*2]
@@ -93,6 +127,12 @@ cglobal pal_demod_row, 6, 11, 13, u, v, pr, stride, cf, w, p1, p2, p3, x, t
     pxor         m1, m1
     pxor         m2, m2
     pxor         m3, m3
+%if mmsize == 64
+    PLANE_LOAD   prq, 0
+    PLANE_LOAD   p1q, 1
+    PLANE_LOAD   p2q, 2
+    PLANE_LOAD   p3q, 3
+%endif
     ; b = 0 reads one position (the coefficients carry the doubling)
     PLANES       0, 0, m0, m2
     ; %%-local so the tap counter cannot leak into the next cglobal's

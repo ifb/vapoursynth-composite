@@ -11,7 +11,7 @@
 
 #define FS COMP_DECODE_FILTER_SIZE
 #define MAXW 928
-#define STRIDE1 (COMP_PAL_DEMOD_ALIGN(MAXW) + 2 * FS)  /* the production layout */
+#define STRIDE1 (COMP_PAL_DEMOD_ALIGN(MAXW) + 2 * COMP_PAL_DEMOD_PAD)  /* the production layout */
 #define STRIDE2 (STRIDE1 + 50)                         /* catch stride bugs */
 #define MAXSTRIDE STRIDE2
 
@@ -41,7 +41,8 @@ static void worst_case(ptrdiff_t stride)
             for (int s = 0; s < (b ? 2 : 1); s++)
                 for (int k = 0; k < 4; k++) {
                     const int16_t *c = coef[row_of(b, s, k)] + 2 * ph;
-                    int16_t *p = pr_buf + 2 * (k * stride + FS + x0 + (s ? -b : b));
+                    int16_t *p = pr_buf + 2 * (k * stride + COMP_PAL_DEMOD_PAD + x0
+                                               + (s ? -b : b));
                     p[0] = c[0] < 0 ? -32768 : 32767;
                     p[1] = c[1] < 0 ? -32768 : 32767;
                 }
