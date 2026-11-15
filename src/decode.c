@@ -495,9 +495,12 @@ static void eq_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int 
 
 /* An int16 copy of a demod row for fir_row_s16, between the same zero
  * wings: FIR16_ROW_LEN(w) elements with the row FIR_WING in. Only
- * [0, w) is ever written, so a buffer is cleared once. */
+ * [0, w) is ever written, so a buffer is cleared once. The eq reads
+ * from the buffer's start, which is 64-byte aligned for the kernel's
+ * block loads. */
 #define FIR16_ROW_LEN(w) (FIR_WING + COMP_FIR_S16_SPAN(w, COMP_EQ_TAPS))
 
+_Static_assert(COMP_EQ_TAPS + 1 <= COMP_FIR_S16_MAXTAPS, "fir_row_s16 tap count");
 _Static_assert(COMP_FIR_S16_ALIGN(COMP_ACTIVE_WIDTH_PAL) == COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)
                && COMP_FIR_S16_ALIGN(COMP_ACTIVE_WIDTH_NTSC) == COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC),
                "fir_row_s16 writes past the eq output rows");
@@ -737,7 +740,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
     int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
     fir_wings_clear(u_row, w);
     fir_wings_clear(v_row, w);
-    int16_t row16_buf[FIR16_ROW_LEN(WIDTH)];
+    DECLARE_ALIGNED( int16_t row16_buf[FIR16_ROW_LEN(WIDTH)], 64 );
     int16_t *row16 = row16_buf + FIR_WING;
     memset(row16_buf, 0, sizeof(row16_buf));
     for (int fr = 0; fr < rows; fr++) {
@@ -1388,7 +1391,7 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
          * sub-nominal low-pass up to the boosted cascade inverse */
         int32_t u_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
         int32_t v_nar[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
-        int16_t row16_buf[FIR16_ROW_LEN(COMP_ACTIVE_WIDTH_NTSC)];
+        DECLARE_ALIGNED( int16_t row16_buf[FIR16_ROW_LEN(COMP_ACTIVE_WIDTH_NTSC)], 64 );
         int16_t *row16 = row16_buf + FIR_WING;
         const int blend = d->eq == 2 && conf;
         memset(row16_buf, 0, sizeof(row16_buf));
@@ -1449,7 +1452,7 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
     int32_t *u_row = u_buf + FIR_WING, *v_row = v_buf + FIR_WING;
 
     memset(s, 0, sizeof(s));
-    int16_t row16_buf[FIR16_ROW_LEN(COMP_ACTIVE_WIDTH_PAL)];
+    DECLARE_ALIGNED( int16_t row16_buf[FIR16_ROW_LEN(COMP_ACTIVE_WIDTH_PAL)], 64 );
     int16_t *row16 = row16_buf + FIR_WING;
     memset(row16_buf, 0, sizeof(row16_buf));
     /* aligned for the same reason as the PAL demod's rows */

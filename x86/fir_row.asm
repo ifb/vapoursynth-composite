@@ -238,11 +238,104 @@ cglobal fir_row_s16, 6, 10, 8, out, in, coef, taps, w, wide, x, pin, pend, dc
     jmp .store
 %endmacro
 
+; The zmm tier of fir_row_s16. A 64-byte load at in[x+j] crosses a
+; cache line for all but one j in 32, so the samples are not memory
+; operands here: a block loads its 64 words once, as two vectors of
+; word pairs (m16, m17), builds the same stream one word on for the odd
+; outputs (m18, m19), and tap pair p takes its 16 pairs out of both
+; with valignd by p. The pairs are unrolled, last first, and entered at
+; the filter's last pair, which covers COMP_FIR_S16_MAXTAPS taps.
+%macro FIR_ROW_S16_ZMM 0
+cglobal fir_row_s16, 6, 9, 20, out, in, coef, taps, w, wide, x, tab, entry
+    movifnidn    wd, wm
+    inc          tapsd
+    shr          tapsd, 1                 ; tap pairs
+    lea          tabq, [.tab]
+    movsxd       entryq, dword [tabq + tapsq*4 - 4]
+    add          entryq, tabq
+    xor          xd, xd
+.groups:
+    pxor         m0, m0
+    pxor         m1, m1
+    pxor         m2, m2
+    pxor         m3, m3
+    movu         m16, [inq + xq*2]
+    movu         m17, [inq + xq*2 + 64]
+    ; pair i of the odd stream is the high word of pair i and the low
+    ; word of pair i + 1; no tap reaches the last pair of m19
+    valignd      m18, m17, m16, 1
+    valignd      m19, m17, m17, 1
+    pslld        m18, 16
+    pslld        m19, 16
+    psrld        m4, m16, 16
+    psrld        m5, m17, 16
+    por          m18, m4
+    por          m19, m5
+    jmp          entryq
+%assign %%p 15
+%rep 16
+.pair %+ %%p:
+    vpbroadcastd m6, [coefq + %%p*4]
+    ; the pairs alternate between the two sums, as in the other tiers
+%if %%p & 1
+    %define %%ae m2
+    %define %%ao m3
+%else
+    %define %%ae m0
+    %define %%ao m1
+%endif
+%if %%p
+    valignd      m4, m17, m16, %%p
+    valignd      m5, m19, m18, %%p
+    vpdpwssd     %%ae, m4, m6
+    vpdpwssd     %%ao, m5, m6
+%else
+    vpdpwssd     %%ae, m16, m6
+    vpdpwssd     %%ao, m18, m6
+%endif
+%assign %%p %%p-1
+%endrep
+    test         wided, wided
+    jnz .join
+    paddd        m0, m2
+    paddd        m1, m3
+    paddd        m0, [d_rnd15]
+    paddd        m1, [d_rnd15]
+    psrad        m0, 15
+    psrad        m1, 15
+.store:
+    punpckhdq    m7, m0, m1
+    punpckldq    m0, m1
+    movu         m2, [q_ilv0]
+    movu         m3, [q_ilv1]
+    vpermi2q     m2, m0, m7
+    vpermi2q     m3, m0, m7
+    movu         [outq + xq*4], m2
+    movu         [outq + xq*4 + 64], m3
+    add          xd, mmsize/2
+    cmp          xd, wd
+    jl .groups
+    RET
+.join:
+    S16_JOIN     m0, m2, m4
+    S16_JOIN     m1, m3, m5
+    jmp .store
+ALIGN 4
+.tab:
+%assign %%p 0
+%rep 16
+    dd .pair %+ %%p - .tab
+%assign %%p %%p+1
+%endrep
+%endmacro
+
 INIT_XMM sse4
 FIR_ROW_S16
 INIT_YMM avx2
 FIR_ROW_S16
 INIT_ZMM avx512
 FIR_ROW_S16
+INIT_ZMM avx512icl
+FIR_ROW_S16_ZMM
 INIT_YMM avxvnni
 FIR_ROW_S16

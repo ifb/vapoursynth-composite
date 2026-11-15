@@ -39,9 +39,13 @@ comp_fir_row_q15_fn comp_get_fir_row_q15_fn(unsigned cpu);
  * being added. SIMD tiers
  * write out through COMP_FIR_S16_ALIGN(w) and read in through
  * COMP_FIR_S16_SPAN(w, taps), the wings and padding being the caller's
- * zeros. */
+ * zeros. The span is a whole block of 64 samples past the last one
+ * whatever the tap count, as the zmm tier loads its blocks whole, and
+ * for the same reason taps is at most COMP_FIR_S16_MAXTAPS; in is best
+ * 64-byte aligned. */
+#define COMP_FIR_S16_MAXTAPS 32
 #define COMP_FIR_S16_ALIGN(w) (((w) + 31) & ~31)
-#define COMP_FIR_S16_SPAN(w, taps) (COMP_FIR_S16_ALIGN(w) + ((taps) + 1) / 2 * 2)
+#define COMP_FIR_S16_SPAN(w, taps) (COMP_FIR_S16_ALIGN(w) + COMP_FIR_S16_MAXTAPS)
 
 typedef void (*comp_fir_row_s16_fn)(int32_t *out, const int16_t *in,
                                     const int16_t *coef, int taps, int w,

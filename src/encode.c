@@ -13,6 +13,7 @@
 
 #include "cpu.h"
 #include "encode.h"
+#include "osdep.h"
 #include "fir_row.h"
 
 /* 1.3 MHz low-pass Gaussian for U/V at PAL 4xfsc [Clarke 3.2.4: >= -3 dB
@@ -156,8 +157,9 @@ void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
      * in [0, w), 0 elsewhere -- centring the row and zeroing the wings
      * reproduces the C bounds check (blanking carries no chroma). The
      * offset lands exactly on int16. */
-    int16_t us[COMP_FIR_S16_SPAN(COMP_ACTIVE_WIDTH_PAL, COMP_UV_MAXTAPS)];
-    int16_t vs[COMP_FIR_S16_SPAN(COMP_ACTIVE_WIDTH_PAL, COMP_UV_MAXTAPS)];
+    _Static_assert(COMP_UV_MAXTAPS + 1 <= COMP_FIR_S16_MAXTAPS, "fir_row_s16 tap count");
+    DECLARE_ALIGNED( int16_t us[COMP_FIR_S16_SPAN(COMP_ACTIVE_WIDTH_PAL, COMP_UV_MAXTAPS)], 64 );
+    DECLARE_ALIGNED( int16_t vs[COMP_FIR_S16_SPAN(COMP_ACTIVE_WIDTH_PAL, COMP_UV_MAXTAPS)], 64 );
     const int lo = ntaps / 2;
 
     memset(us, 0, sizeof(int16_t) * span);

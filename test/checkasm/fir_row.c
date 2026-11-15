@@ -154,7 +154,11 @@ static void check_fir_row_s16(void)
             comp_decode_free(d);
             free(d);
         }
-        checkasm_bench_new(out_a, in16, enc[0].uv_taps16, enc[0].uv_ntaps, MAXW, 0);
+        /* the decoders' eq is the kernel's longest and most frequent
+         * filter; coef16 still holds the NTSC one */
+        for (int k = 0; k < INLEN16; k++)
+            in16[k] = (int16_t)(checkasm_rand() % 20001 - 10000);
+        checkasm_bench_new(out_a, in16, coef16, COMP_EQ_TAPS + 1, MAXW, 0);
     }
     checkasm_report("fir_row_s16");
 }
