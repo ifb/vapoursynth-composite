@@ -3,7 +3,7 @@ project('composite', 'c',
     license: 'GPL-3.0-or-later',
     license_files: 'COPYING',
     meson_version: '>=1.2.3',
-    version: '2',
+    version: '3',
 )
 
 cc = meson.get_compiler('c')
